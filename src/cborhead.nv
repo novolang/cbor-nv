@@ -1,0 +1,214 @@
+// cborhead — CBOR's initial byte and argument, as a state machine that
+// allocates nothing, holds no buffer, and builds for a
+// microcontroller.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHY THIS MODULE IS THE DEVICE HALF.  `cborfmt` speaks `Bytes`, `Str`
+// and a recursive value tree, and none of those links at the embedded
+// tier: the embedded runtime defines no `novo_bytes_*` symbol, and a
+// tree is a heap allocation per node.  One host-only function anywhere
+// in a compilation unit is an undefined symbol on a device whether or
+// not the firmware calls it, so the half a device uses is its own
+// module and takes and returns integers.
+//
+// WHY A HEAD CODEC IS ENOUGH TO BE USEFUL.  RFC 8949 § 3 puts every
+// value behind one shape: three bits of MAJOR TYPE, five bits of
+// ADDITIONAL INFORMATION, and then zero, one, two, four or eight bytes
+// of ARGUMENT.  A producer on a device writes heads and payload bytes
+// and never builds a tree at all — a sensor batch is an array head, a
+// map head per reading, and integers — and a consumer on a device walks
+// heads and skips what it does not want.  That is the whole of CBOR
+// that firmware needs, and it is what makes the format the one the
+// embedded tier prefers.
+//
+// THE SCAN IS BYTE AT A TIME because a device reading from a UART has
+// one byte and nothing else.  A caller with a whole buffer uses
+// `cborfmt` and never meets this module.
+
+// Major type 0: an unsigned integer, `0 ..= 2^64 - 1`.
+//
+// ```novo
+// use cborhead
+//
+// fn main() [io]
+//     println("${cborhead.major_unsigned()}")   // 0
+// ```
+pub fn major_unsigned() -> Int
+    todo("cborhead.major_unsigned")
+
+// Major type 1: a negative integer.  The argument `n` means `-1 - n`,
+// so the encoding has no redundant negative zero and a one-byte head
+// reaches -24.
+pub fn major_negative() -> Int
+    todo("cborhead.major_negative")
+
+// Major type 2: a byte string.  The argument is its length.
+pub fn major_bytes() -> Int
+    todo("cborhead.major_bytes")
+
+// Major type 3: a text string, UTF-8 by specification.  The argument is
+// its length IN BYTES and never in characters.
+pub fn major_text() -> Int
+    todo("cborhead.major_text")
+
+// Major type 4: an array.  The argument is its element count.
+pub fn major_array() -> Int
+    todo("cborhead.major_array")
+
+// Major type 5: a map.  The argument is its PAIR count, so a map head
+// of 2 is followed by four values.
+pub fn major_map() -> Int
+    todo("cborhead.major_map")
+
+// Major type 6: a tag.  The argument is the tag number, and exactly one
+// data item follows.
+pub fn major_tag() -> Int
+    todo("cborhead.major_tag")
+
+// Major type 7: the simple values and the floats — `false`, `true`,
+// `null`, `undefined`, the half, single and double floats, and the
+// break byte that ends an indefinite-length item.
+pub fn major_simple() -> Int
+    todo("cborhead.major_simple")
+
+// `0xff`, the break: what ends an indefinite-length string, array or
+// map.
+//
+// It is major type 7 with additional information 31, which is why no
+// other value may use that combination.
+pub fn break_byte() -> Int
+    todo("cborhead.break_byte")
+
+// How many bytes the shortest head for `arg` occupies: 1, 2, 3, 5 or 9.
+//
+// One byte for `0 ..= 23`, which is what makes a small map of small
+// integers almost free; then a byte, two, four or eight of argument.
+//
+// ```novo
+// use cborhead
+//
+// fn main() [io]
+//     println("${cborhead.head_len(23)} ${cborhead.head_len(24)}")   // 1 2
+// ```
+pub fn head_len(arg: Int) -> Int
+    todo("cborhead.head_len")
+
+// The initial byte of the shortest head for `major` and `arg`.
+//
+// The three bits of major type shifted up five, then the additional
+// information: the argument itself for `0 ..= 23`, and 24, 25, 26 or 27
+// for the four argument widths.
+pub fn initial_byte(major: Int, arg: Int) -> Int
+    todo("cborhead.initial_byte")
+
+// The value a major-type-1 argument stands for: `-1 - arg`.
+pub fn negative_value(arg: Int) -> Int
+    todo("cborhead.negative_value")
+
+// The major-type-1 argument that stands for `v`: `-1 - v`.
+//
+// `v` must be negative; a non-negative value belongs in major type 0.
+pub fn negative_arg(v: Int) -> Int
+    todo("cborhead.negative_arg")
+
+// A head being read, one byte at a time.
+//
+// A `@value` struct, so it lives in the caller's stack frame with no
+// header, no reference count and no allocation.  A device walking a
+// document owns forty bytes of its own frame and nothing else.
+//
+// `seen` counts the bytes consumed and `want` is the total the initial
+// byte announced — 0 until that byte arrives.  `done` is set when
+// `seen` reaches `want`, `indefinite` when the additional information
+// was 31, and `bad` when the initial byte was major type 7 additional
+// information 28, 29 or 30, which RFC 8949 § 3 reserves and no document
+// may use.
+pub @value
+struct CborHeadScan
+    major: Int
+    arg: Int
+    seen: Int
+    want: Int
+    indefinite: Bool
+    done: Bool
+    bad: Bool
+
+// A fresh scan, waiting for an initial byte.
+//
+// ```novo
+// use cborhead
+//
+// fn main() [io]
+//     println("${cborhead.scan().seen}")   // 0
+// ```
+pub fn scan() -> CborHeadScan
+    todo("cborhead.scan")
+
+// Feed one byte and answer the scan after it.
+//
+// The first byte sets `major`, `want` and possibly `indefinite`; the
+// rest accumulate `arg` big-endian.  A byte fed to a scan that is
+// already `done` is ignored, because a `@value` function has nowhere to
+// put a refusal and a caller that checks `done` cannot reach the case.
+//
+// ```novo
+// use cborhead
+//
+// fn main() [io]
+//     // 0x01 is major type 0, argument 1: a whole head in one byte.
+//     let s = cborhead.push(cborhead.scan(), 0x01 as u8)
+//     println("${s.done} ${s.arg}")   // true 1
+// ```
+pub fn push(s: CborHeadScan, b: u8) -> CborHeadScan
+    todo("cborhead.push")
+
+// How many more bytes the scan needs: `want - seen`, and 1 before the
+// initial byte has arrived.
+//
+// What a device reading from a UART asks so that it can wait for
+// exactly that many.
+pub fn scan_need(s: CborHeadScan) -> Int
+    todo("cborhead.scan_need")
+
+// What one head write produced: the bytes, and whether the head was
+// writable.
+//
+// `out` is a fixed nine-byte inline array because nine is the longest
+// head — an initial byte and an eight-byte argument — and a list would
+// be a heap allocation in an interrupt handler.  `ok` is false for a
+// major type outside `0 ..= 7` or a negative argument.
+pub @value
+struct CborEmit
+    out: [u8; 9]
+    len: Int
+    ok: Bool
+
+// The shortest head for `major` and `arg`.
+//
+// ```novo
+// use cborhead
+//
+// fn main() [io]
+//     let e = cborhead.emit_head(cborhead.major_array(), 2)
+//     println("${e.len}")   // 1 — 0x82, an array of two
+// ```
+pub fn emit_head(major: Int, arg: Int) -> CborEmit
+    todo("cborhead.emit_head")
+
+// The indefinite-length head for `major`: the initial byte with
+// additional information 31, and nothing after it.
+//
+// Valid for major types 2, 3, 4 and 5 only; anything else answers
+// `ok = false`.  This is the head a producer writes when it does not
+// yet know how long the thing will be — which is the case a device
+// streaming a log is always in, and the reason CBOR has the form at
+// all.
+pub fn emit_indefinite(major: Int) -> CborEmit
+    todo("cborhead.emit_indefinite")
+
+// The break byte, as an emit, so a producer writing heads writes its
+// terminator the same way it writes everything else.
+pub fn emit_break() -> CborEmit
+    todo("cborhead.emit_break")

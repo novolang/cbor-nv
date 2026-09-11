@@ -1,0 +1,533 @@
+// cborfmt — the CBOR value tree, the tags, and the encoder that writes
+// them.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHY THE MODULE IS NOT CALLED `cbor`.  serde-nv already ships a module
+// of that name — the subset its trait walk needs — and two dependencies
+// of one program may not both ship a module with the same name.  The
+// README says what this package adds over that module and why both
+// exist.
+//
+// WHAT IT IS.  RFC 8949: JSON's data model plus byte strings, plus
+// tags, plus a self-describing binary encoding in which every value is
+// three bits of major type, five bits of additional information and an
+// argument.  A `{"a":1}` costs seven bytes as JSON and four here, a
+// small integer costs one, and a producer that does not know a length
+// in advance can say so rather than buffering.
+//
+// FOUR SURFACES, and a reader should know which one they are on.
+//
+//   * The VALUE TREE — this module — is the format itself.  Reach for
+//     it when the other end is not novo-lang, when the document's shape
+//     is not a struct, or when a tag is involved.
+//   * The STREAM — `cbordec` — is the same decoder fed a chunk at a
+//     time, for a document that arrives in pieces.
+//   * The TRAIT bridge — `cborserde` — writes a novo-lang type with no
+//     code to write.
+//   * The HEAD codec — `cborhead` — is the device half: integers only,
+//     no allocation, and it compiles for a Cortex-M.
+//
+// INDEFINITE LENGTHS ARE READ AND COLLAPSED.  A value tree has nowhere
+// to put "this array's length was not announced": the elements are the
+// same elements either way.  So an indefinite array decodes to
+// `CborArray`, an indefinite byte string to the concatenation of its
+// chunks, and `encode` writes definite lengths throughout.  What that
+// costs is that BYTES do not round-trip for an indefinite document,
+// only VALUES do — and `cbordec.saw_indefinite` is how a caller who
+// cares finds out.  A producer that needs to write the indefinite form
+// writes heads with `cborhead`.
+
+// A CBOR value.
+//
+// The names are all prefixed because a variant is constructed by name
+// across the whole assembly, and `Null`, `Text` and `Map` are names
+// every codec wants.
+pub enum CborValue
+    // Major type 0, for an argument that fits a signed `Int`.
+    CborUnsigned(v: Int)
+    // Major type 1, as the value it stands for: the argument `n` means
+    // `-1 - n`, so this is always negative.
+    CborNegative(v: Int)
+    // An integer whose magnitude does not fit a signed `Int`: major
+    // type 0 with an argument at or above 2^63, or major type 1 with
+    // the same, which stands for a value below -2^63.
+    //
+    // `bits` is the ARGUMENT's 64-bit pattern, not the value's, so the
+    // two majors are told apart by `major` and never by the sign of
+    // `bits`.  A separate case rather than a silent reinterpretation,
+    // because a reader handed `-1` for `18446744073709551615` would
+    // have no way to tell it from an actual `-1`.
+    //
+    // A value beyond 64 bits is not this — it is a bignum, tag 2 or 3,
+    // and `bignum_of` reads it.
+    CborWideInt(major: Int, bits: Int)
+    // Major type 2: a byte string.
+    CborBytes(v: Bytes)
+    // Major type 3: a text string, UTF-8 by specification.  A decoder
+    // refuses bytes that are not.
+    CborText(v: Str)
+    // Major type 4: an array.
+    CborArray(items: [CborValue])
+    // Major type 5: a map.
+    //
+    // A LIST of pairs rather than a keyed collection, for two reasons
+    // the format forces: a CBOR key is any value and not only a string,
+    // and RFC 8949 § 5.6 permits duplicate keys while calling the
+    // document that has them invalid — which means a validator has to
+    // be able to SEE both, and a keyed collection would have dropped
+    // one.
+    CborMap(entries: [CborPair])
+    // Major type 6: a tag and the single data item it qualifies.
+    //
+    // Tags nest: a tag 55799 around a tag 0 around a text string is
+    // three levels and is a document a real program meets.
+    CborTagged(tag: Int, item: CborValue)
+    // Major type 7, values 20 and 21.
+    CborBool(v: Bool)
+    // Major type 7, value 22.
+    CborNull
+    // Major type 7, value 23.
+    //
+    // NOT the same as `CborNull`, and the difference matters where CBOR
+    // is used as a patch format: null means "this member is absent" and
+    // undefined means "this member is unchanged".
+    CborUndefined
+    // Major type 7 with an additional information of 0..19 or 32..255 —
+    // a simple value with no assigned meaning.
+    //
+    // A document that carries one is asking a reader to know something
+    // the specification does not say, and this is what lets a reader
+    // pass it on untouched rather than refusing it.
+    CborSimple(v: Int)
+    // Major type 7, additional information 25: a half-precision float.
+    //
+    // Kept apart from the wider two because the width is on the wire
+    // and because half precision is what an embedded producer sends: a
+    // temperature to one decimal place costs three bytes here and nine
+    // as a double.
+    CborFloat16(v: Float)
+    // Major type 7, additional information 26.
+    CborFloat32(v: Float)
+    // Major type 7, additional information 27, and what a novo-lang
+    // `Float` is.
+    CborFloat64(v: Float)
+
+// One entry of a `CborMap`.
+//
+// A struct rather than a two-element array because both halves are
+// values and an array of two `CborValue`s reads as an array of two
+// values, which is a different document.
+pub struct CborPair
+    key: CborValue
+    value: CborValue
+
+// How an encoder chooses between the encodings of the same value.
+//
+// Both write definite lengths and neither writes an indefinite one; the
+// difference is in the arguments and the map order.
+pub enum CborMode
+    // The shortest head for every value, and members in the order the
+    // tree holds them.  What most writers produce and what a reader
+    // should expect.
+    CborShortest
+    // RFC 8949 § 4.2.1 core deterministic encoding: the shortest head
+    // for every value, definite lengths throughout, floats shrunk to
+    // the narrowest width that round-trips exactly, and MAP KEYS SORTED
+    // by the bytes of their own encoding.
+    //
+    // The sort is the part that costs something — every key has to be
+    // encoded before the map's order is known — and it is the part that
+    // matters: two programs that agree on this produce byte-identical
+    // documents for equal values, which is what lets a CBOR document be
+    // hashed, signed or used as a cache key.
+    CborCanonical
+
+// What went wrong reading or writing CBOR bytes.
+//
+// Every variant but the last is an input fault, so it is a value: bytes
+// arriving off a wire are data, and refusing to answer is a result
+// while crashing is not.  Each carries the offset it was found at.
+//
+// The names are all prefixed because a variant is constructed by name
+// across the whole assembly, and `Truncated` is the name every codec
+// wants.
+pub enum CborError
+    // The buffer ended in the middle of a value.  `need` is how many
+    // more bytes the head said were coming.
+    CborTruncated(at: Int, need: Int)
+    // Major type 7 with additional information 28, 29 or 30, which
+    // RFC 8949 § 3 reserves and no document may use.
+    CborReservedInfo(at: Int, info: Int)
+    // An indefinite-length head on a major type that may not have one —
+    // anything but a byte string, a text string, an array or a map.
+    CborBadIndefinite(at: Int, major: Int)
+    // A break byte where no indefinite-length item was open, or in the
+    // middle of a map's key-value pair.
+    CborUnexpectedBreak(at: Int)
+    // A chunk of an indefinite-length string whose major type is not
+    // the string's own.  RFC 8949 § 3.2.3 requires every chunk to match.
+    CborBadChunk(at: Int, major: Int)
+    // A text string whose bytes are not UTF-8.  A byte string has no
+    // such rule, which is what a byte string is for.
+    CborBadUtf8(at: Int)
+    // The value nested deeper than the decoder's limit.
+    //
+    // Not pedantry: an array head costs one byte and can open a level,
+    // so a decoder without a limit is a stack overflow that arrives as
+    // a five-byte message.
+    CborDepthExceeded(at: Int, depth: Int)
+    // A value was read and bytes were left over.  A caller decoding one
+    // document from one buffer wants to know; a caller reading a stream
+    // uses `cbordec` and never meets this.
+    CborTrailingBytes(at: Int, len: Int)
+    // An accessor was asked for one type and the value was another.
+    // `want` and `saw` are `type_name`'s spellings.
+    CborWrongType(at: Int, want: Str, saw: Str)
+    // A tagged item whose payload is not the shape the tag requires — a
+    // bignum that is not a byte string, a decimal fraction that is not
+    // a two-element array, a tag 0 that is not text.
+    CborBadTagPayload(at: Int, tag: Int)
+    // The destination handed to `encode_into` was shorter than
+    // `encoded_len` says.  Nothing is written in that case: a partially
+    // encoded buffer is worse than none, because it looks like a
+    // document.
+    CborBufferTooSmall(need: Int, have: Int)
+
+// The standard `Error` implementation, so a bad document can be
+// reported by anything that reports errors.
+impl Error for CborError
+    // Answer the one-line report: what was wrong, and at what byte
+    // offset.
+    fn message(self) -> Str
+        todo("cborfmt.CborError.message")
+
+// ── Reading a value that has already been decoded ───────────────────
+
+// The kind `v` belongs to, as RFC 8949 names it: `unsigned`,
+// `negative`, `wide`, `bytes`, `text`, `array`, `map`, `tag`, `bool`,
+// `null`, `undefined`, `simple`, `float16`, `float32` or `float64`.
+//
+// What `CborWrongType` reports, and what a caller printing a document's
+// shape uses.
+//
+// ```novo
+// use cborfmt
+//
+// fn main() [io]
+//     println(cborfmt.type_name(CborNull))   // null
+// ```
+pub fn type_name(v: CborValue) -> Str
+    todo("cborfmt.type_name")
+
+// The integer in `v`, or `CborWrongType`.
+//
+// Both `CborUnsigned` and `CborNegative` answer here, because the split
+// is the wire's and not the caller's.  `CborWideInt` does not: its
+// value does not fit a signed `Int`, and answering the bit pattern
+// would hand a caller a negative number for a positive document.
+pub fn as_int(v: CborValue) -> Result<Int, CborError>
+    todo("cborfmt.as_int")
+
+// The boolean in `v`, or `CborWrongType`.
+pub fn as_bool(v: CborValue) -> Result<Bool, CborError>
+    todo("cborfmt.as_bool")
+
+// The float in `v`, or `CborWrongType`.
+//
+// All three widths answer here: a caller that cares which one it was
+// matches on the value instead.
+pub fn as_float(v: CborValue) -> Result<Float, CborError>
+    todo("cborfmt.as_float")
+
+// The text in `v`, or `CborWrongType`.
+//
+// A `CborBytes` is not text even when its bytes happen to be UTF-8,
+// because the document said otherwise and telling the two apart is what
+// major type 2 exists for.
+pub fn as_text(v: CborValue) -> Result<Str, CborError>
+    todo("cborfmt.as_text")
+
+// The bytes in `v`, or `CborWrongType`.
+pub fn as_bytes(v: CborValue) -> Result<Bytes, CborError>
+    todo("cborfmt.as_bytes")
+
+// The elements of `v`, or `CborWrongType`.
+pub fn as_array(v: CborValue) -> Result<[CborValue], CborError>
+    todo("cborfmt.as_array")
+
+// The entries of `v`, in the order the document wrote them, or
+// `CborWrongType`.
+pub fn as_map(v: CborValue) -> Result<[CborPair], CborError>
+    todo("cborfmt.as_map")
+
+// `v` with every enclosing tag removed.
+//
+// Tags nest, and a caller that wants the value rather than its
+// provenance would otherwise write the unwrapping loop itself.  A value
+// with no tag on it comes back as itself.
+//
+// ```novo
+// use cborfmt
+//
+// fn main() [io]
+//     let doc = CborTagged(55799, CborTagged(0, CborText("1970-01-01T00:00:00Z")))
+//     println(cborfmt.type_name(cborfmt.untagged(doc)))   // text
+// ```
+pub fn untagged(v: CborValue) -> CborValue
+    todo("cborfmt.untagged")
+
+// The value `key` maps to in `v`, looked up by TEXT key, or
+// `CborWrongType`.
+//
+// Text keys only, because a lookup by an arbitrary `CborValue` needs an
+// equality this package does not define — CBOR's own equality has to
+// decide whether `1` and `1.0` are the same key, and RFC 8949 § 5.6
+// leaves that to the application.  A caller with non-text keys walks
+// `as_map`.
+pub fn get(v: CborValue, key: Str) -> Result<CborValue, CborError>
+    todo("cborfmt.get")
+
+// ── The tags a program actually meets ───────────────────────────────
+
+// Tag 0: a standard date/time string, RFC 3339.
+pub fn tag_datetime_text() -> Int
+    todo("cborfmt.tag_datetime_text")
+
+// Tag 1: an epoch-based date/time — seconds since 1970-01-01T00:00:00Z,
+// as an integer or a float.
+pub fn tag_datetime_epoch() -> Int
+    todo("cborfmt.tag_datetime_epoch")
+
+// Tag 2: an unsigned bignum, carried as a big-endian byte string.
+pub fn tag_bignum_unsigned() -> Int
+    todo("cborfmt.tag_bignum_unsigned")
+
+// Tag 3: a negative bignum.  The byte string `n` stands for `-1 - n`,
+// exactly as major type 1's argument does.
+pub fn tag_bignum_negative() -> Int
+    todo("cborfmt.tag_bignum_negative")
+
+// Tag 4: a decimal fraction — a two-element array of an exponent and a
+// mantissa, meaning `mantissa * 10 ^ exponent`.
+pub fn tag_decimal_fraction() -> Int
+    todo("cborfmt.tag_decimal_fraction")
+
+// Tag 5: a bigfloat — the same two-element array, base 2.
+pub fn tag_bigfloat() -> Int
+    todo("cborfmt.tag_bigfloat")
+
+// Tag 55799: self-described CBOR.
+//
+// Its encoding, `d9d9f7`, is a three-byte prefix that no other format's
+// magic collides with, so a file that begins with it can be identified
+// as CBOR without being parsed.  A caller writing a file wants it; a
+// caller writing a network message does not.
+pub fn tag_self_described() -> Int
+    todo("cborfmt.tag_self_described")
+
+// A date/time, as tag 0 or tag 1 carries one.
+//
+// The text form is NOT parsed here: a `core` package has no calendar,
+// and turning an RFC 3339 string into a civil date is calendar-nv's
+// work.  What this does is tell a caller which of the two forms the
+// document used and hand over what it said.
+pub enum CborDateTime
+    // Tag 0: an RFC 3339 string, exactly as the document wrote it.
+    CborDateText(v: Str)
+    // Tag 1: seconds since the epoch, whole and fractional.
+    //
+    // Two fields because the document may write either an integer or a
+    // float, and a caller that was sent an integer should not have to
+    // reason about a double's precision to read it back.  `fraction` is
+    // 0.0 for the integer form.
+    CborDateEpoch(seconds: Int, fraction: Float)
+
+// An integer of any size, as tags 2 and 3 carry one.
+//
+// `magnitude` is big-endian with no leading zero bytes, so it is the
+// shape both tags use; `negative` says which tag it was.  A negative
+// bignum's magnitude is the tag-3 byte string itself, which stands for
+// `-1 - magnitude` — the same fold major type 1 uses, and the reason
+// the two are not symmetric around zero.
+//
+// The arithmetic is deliberately absent.  bigint-nv is where addition
+// lives; this package's job is to get the bytes in and out with their
+// sign intact.
+pub struct CborBigNum
+    magnitude: Bytes
+    negative: Bool
+
+// A decimal fraction, as tag 4 carries one: `mantissa * 10 ^ exponent`.
+//
+// The mantissa is a `CborBigNum` rather than an `Int` because the tag
+// permits a bignum there and a currency amount with eighteen digits is
+// exactly the case the tag exists for.  A mantissa that fits an `Int`
+// still arrives here as its magnitude bytes, so a caller writes one
+// reader rather than two.
+pub struct CborDecimal
+    exponent: Int
+    mantissa: CborBigNum
+
+// The value for a date/time in the text form, tag 0.
+//
+// `text` is written as given and is not validated against RFC 3339 —
+// a `core` package has no calendar, and a validator that half-knew the
+// grammar would be worse than one that does not claim to.
+pub fn datetime_text_value(text: Str) -> CborValue
+    todo("cborfmt.datetime_text_value")
+
+// The value for a date/time in the epoch form, tag 1.
+//
+// `seconds` is a parameter and never a reading of a clock: a `core`
+// package has no clock, which is the same rule that makes a gzip
+// header's mtime a parameter and is what makes a document
+// reproducible.
+pub fn datetime_epoch_value(seconds: Int) -> CborValue
+    todo("cborfmt.datetime_epoch_value")
+
+// The date/time `v` carries, or `CborWrongType` when it is not tagged 0
+// or 1, or `CborBadTagPayload` when the payload is the wrong shape.
+//
+// ```novo
+// use cborfmt
+//
+// fn main() [io]
+//     match cborfmt.datetime_of(cborfmt.datetime_epoch_value(0))
+//         Ok(CborDateEpoch(s, f)) => println("${s}")   // 0
+//         Ok(CborDateText(t))     => println(t)
+//         Err(e)                  => println(e.message())
+// ```
+pub fn datetime_of(v: CborValue) -> Result<CborDateTime, CborError>
+    todo("cborfmt.datetime_of")
+
+// The value for `n` as tag 2 or tag 3.
+pub fn bignum_value(n: CborBigNum) -> CborValue
+    todo("cborfmt.bignum_value")
+
+// The bignum `v` carries, or `CborWrongType` when it is not tagged 2 or
+// 3, or `CborBadTagPayload` when the payload is not a byte string.
+pub fn bignum_of(v: CborValue) -> Result<CborBigNum, CborError>
+    todo("cborfmt.bignum_of")
+
+// The value for `d` as tag 4.
+pub fn decimal_value(d: CborDecimal) -> CborValue
+    todo("cborfmt.decimal_value")
+
+// The decimal fraction `v` carries, or `CborWrongType` when it is not
+// tagged 4, or `CborBadTagPayload` when the payload is not a
+// two-element array of an exponent and an integer or bignum mantissa.
+pub fn decimal_of(v: CborValue) -> Result<CborDecimal, CborError>
+    todo("cborfmt.decimal_of")
+
+// ── Writing ─────────────────────────────────────────────────────────
+
+// The first byte the shortest encoding of `v` begins with.
+//
+// What a reader checking this package against RFC 8949 § 3.3's table
+// reads, and what a caller peeking at a document's first byte compares
+// against.
+pub fn initial_byte(v: CborValue) -> Int
+    todo("cborfmt.initial_byte")
+
+// How many bytes `v` encodes to in `mode`, without encoding it.
+//
+// What a caller sizing the destination for `encode_into` asks first.
+// Exact rather than an upper bound, in both modes: sorting a map's keys
+// changes their order and never their sizes.
+//
+// ```novo
+// use cborfmt
+//
+// fn main() [io]
+//     println("${cborfmt.encoded_len(CborUnsigned(1), CborShortest)}")   // 1
+// ```
+pub fn encoded_len(v: CborValue, mode: CborMode) -> Int
+    todo("cborfmt.encoded_len")
+
+// Encode `v` and answer the bytes.
+//
+// Definite lengths throughout, in both modes.  It cannot fail: every
+// `CborValue` has an encoding.
+//
+// ```novo
+// use std.bytes
+// use cborfmt
+//
+// fn main() [io]
+//     let doc = CborArray([CborUnsigned(1), CborUnsigned(2)])
+//     println(bytes.to_hex(cborfmt.encode(doc, CborShortest)))
+//     // 820102 — an array of two, then two one-byte integers
+// ```
+pub fn encode(v: CborValue, mode: CborMode) -> Bytes
+    todo("cborfmt.encode")
+
+// Encode `v` into a buffer the caller already owns, and answer the
+// bytes written.
+//
+// `CborBufferTooSmall` when the cursor has less room than `encoded_len`
+// says, and nothing is written in that case.
+pub fn encode_into(v: CborValue, mode: CborMode, mut dst: Cursor) -> Result<Int, CborError>
+    todo("cborfmt.encode_into")
+
+// Whether `src` is what `CborCanonical` would have produced for the
+// value it decodes to.
+//
+// The check a verifier runs before it hashes or signs a document: two
+// programs that agree on the deterministic encoding produce identical
+// bytes for equal values, and a document that is not in that form has
+// to be re-encoded before its hash means anything.  A byte sequence
+// that does not decode at all answers the decoder's own error.
+pub fn is_canonical(src: Bytes) -> Result<Bool, CborError>
+    todo("cborfmt.is_canonical")
+
+// ── Reading bytes ───────────────────────────────────────────────────
+
+// Decode `src` as exactly one document.
+//
+// Indefinite-length items are read and collapsed: an indefinite array
+// becomes a `CborArray` and an indefinite byte string becomes the
+// concatenation of its chunks.  Bytes after the value are
+// `CborTrailingBytes` — a caller who meant to read one document from a
+// longer buffer wants `decode_prefix`, and a caller reading a stream
+// wants `cbordec`.
+//
+// ```novo
+// use std.bytes
+// use cborfmt
+//
+// fn main() [io]
+//     match cborfmt.decode(bytes.from_hex("f6") ?? bytes.zeros(0))
+//         Ok(v)  => println(cborfmt.type_name(v))   // null
+//         Err(e) => println(e.message())
+// ```
+pub fn decode(src: Bytes) -> Result<CborValue, CborError>
+    todo("cborfmt.decode")
+
+// One value and the bytes it occupied: what `decode_prefix` answers.
+//
+// `consumed` is the only way to find the start of the next document,
+// because CBOR has no terminator and no framing — a document's end is
+// wherever its outermost value ended.
+pub struct CborPrefix
+    value: CborValue
+    consumed: Int
+
+// Decode the first document in `src` and say how long it was.
+//
+// What a caller reading a sequence of documents out of one buffer
+// wants — which RFC 8742 calls a CBOR sequence, and which is exactly
+// "one document after another with nothing between them".
+pub fn decode_prefix(src: Bytes) -> Result<CborPrefix, CborError>
+    todo("cborfmt.decode_prefix")
+
+// The deepest nesting `decode` and `decode_prefix` accept: 64.
+//
+// An array head is one byte and can open a level, so a document of a
+// hundred thousand bytes can ask for a hundred thousand levels of
+// recursion.  The limit is what turns that from a crash into a
+// `CborDepthExceeded`, and `cbordec.with_depth_limit` is how a caller
+// who genuinely has deeper data raises it.
+pub fn default_depth_limit() -> Int
+    todo("cborfmt.default_depth_limit")

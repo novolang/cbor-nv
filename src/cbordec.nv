@@ -1,0 +1,142 @@
+// cbordec — the CBOR decoder as a state machine a host pumps.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHY THIS IS A SEPARATE MODULE FROM `cborfmt`.  `cborfmt.decode` takes
+// a whole document and answers a whole value; this takes a chunk and
+// answers whatever is finished.  They are the same arithmetic with
+// different ownership, and a caller reading a socket has no whole
+// document to hand over — which is exactly the case a `core` package is
+// shaped for, because it is the case where the host has to keep
+// control.
+//
+// THE SHAPE IS FEED AND DRAIN (`docs/publishing.md` § How a `core`
+// package takes bytes from its host): the host pumps chunks in and
+// takes finished values out.  Right here rather than the event form
+// tar-nv uses, because a CBOR document is a message rather than a file
+// — a sensor batch, a COSE envelope, a log record — and a decoder that
+// emitted "array started" events would make every caller reassemble the
+// tree that this one already has.
+//
+// WHERE INDEFINITE LENGTHS FIT.  This is the decoder that actually
+// needs them: a producer streaming a log does not know how many records
+// it will send, so it opens an indefinite array and closes it with a
+// break.  This decoder reads that and answers ONE value when the break
+// arrives, which means a caller waiting on a never-closed stream waits
+// forever — so a caller that wants the records as they arrive asks the
+// producer for one document per record instead, which is what RFC 8742
+// sequences are for.  `saw_indefinite` is how a caller finds out which
+// kind of producer it has.
+
+// A decoder between two chunks.
+//
+// `held` is the tail of the last chunk that did not finish a value —
+// the one thing a streaming decoder must carry — and `at` is the byte
+// offset from the start of the STREAM, so a fault in the fortieth chunk
+// reports where it really was rather than where it was in that chunk.
+//
+// `depth_limit` travels on the decoder rather than on `feed` so that a
+// caller sets it once, and so that two decoders in one program can
+// disagree.
+pub struct CborDecoder
+    held: Bytes
+    at: Int
+    depth_limit: Int
+    indefinite_seen: Bool
+
+// A fresh decoder with nothing held, at offset zero, at the default
+// depth limit.
+//
+// ```novo
+// use cborfmt
+// use cbordec
+//
+// fn main() [io]
+//     println("${cbordec.pending(cbordec.decoder())}")   // 0
+// ```
+pub fn decoder() -> CborDecoder
+    todo("cbordec.decoder")
+
+// `d` with a different nesting limit.
+//
+// A caller who genuinely has data ninety levels deep raises it; a
+// caller decoding messages from the network lowers it.  A limit below 1
+// is taken as 1, because a document is at least one value deep.
+pub fn with_depth_limit(d: CborDecoder, limit: Int) -> CborDecoder
+    todo("cbordec.with_depth_limit")
+
+// How many bytes the decoder is holding that did not finish a value.
+//
+// What a caller watching for a stalled producer reads: a `pending` that
+// stops changing while the connection is open is a peer that stopped
+// mid-document.
+pub fn pending(d: CborDecoder) -> Int
+    todo("cbordec.pending")
+
+// How many bytes of the stream the decoder has consumed, counted from
+// the first chunk.
+//
+// The offset every `CborError` is reported against.
+pub fn stream_at(d: CborDecoder) -> Int
+    todo("cbordec.stream_at")
+
+// Whether any value drained so far was written with an
+// indefinite-length head.
+//
+// The value tree collapses the indefinite form — the elements are the
+// same elements either way — so re-encoding a document this decoder
+// read produces different BYTES.  A caller that only wants the values
+// can ignore this; a caller verifying a signature over the original
+// bytes cannot, and this is what tells it so.
+pub fn saw_indefinite(d: CborDecoder) -> Bool
+    todo("cbordec.saw_indefinite")
+
+// What one `feed` produced: the decoder after it, and the values that
+// finished.
+//
+// `values` is empty when the chunk did not complete anything, which is
+// the ordinary case for a large document arriving in small pieces, and
+// holds more than one when a chunk carried several — a decoder that
+// answered at most one value per chunk would need the caller to keep
+// feeding empty chunks to drain it.
+pub struct CborFeed
+    decoder: CborDecoder
+    values: [CborValue]
+
+// Feed a chunk, and answer everything it finished.
+//
+// The fault cases are `cborfmt`'s and mean the same things, with `at`
+// counted from the start of the stream: a reserved additional
+// information, an indefinite head where the major type may not have
+// one, a break with nothing open, a mismatched chunk in an indefinite
+// string, text that is not UTF-8, or nesting past the limit.
+// `CborTruncated` is NOT among them — a value that has not arrived yet
+// is what `held` is for, and only `finish` calls an unfinished value an
+// error.
+//
+// ```novo
+// use std.bytes
+// use std.list
+// use cborfmt
+// use cbordec
+//
+// fn main() [io]
+//     // 82 01 02 is a two-element array, split across two chunks.
+//     match cbordec.feed(cbordec.decoder(), bytes.from_hex("8201") ?? bytes.zeros(0))
+//         Err(e)    => println(e.message())
+//         Ok(first) =>
+//             println("${list.len(first.values)}")   // 0 — nothing finished yet
+// ```
+pub fn feed(d: CborDecoder, chunk: Bytes) -> Result<CborFeed, CborError>
+    todo("cbordec.feed")
+
+// Declare the stream over.
+//
+// `CborTruncated` when a partial value is still held, naming how many
+// more bytes it needed, and the decoder back otherwise.  An
+// indefinite-length item that the producer never closed is exactly this
+// case, and it is the one a caller most wants told about: the bytes
+// look fine and the value never arrives.
+pub fn finish(d: CborDecoder) -> Result<CborDecoder, CborError>
+    todo("cbordec.finish")

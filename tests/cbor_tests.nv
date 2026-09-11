@@ -1,0 +1,693 @@
+// tests/cbor_tests.nv — the API tests, written against the signatures.
+//
+// They COMPILE today and they FAIL at run, with `not implemented:
+// cborfmt.<fn>` from the `todo()` that is each body.  That is the
+// expected state of an interface release: the compiler has checked
+// every signature, every type and every effect row, and nothing else
+// has been checked because there is nothing else yet.
+//
+// EVERY VECTOR IS RFC 8949's.  Appendix A is the specification's own
+// table of "diagnostic notation, encoded" pairs — a hundred-odd of them
+// — and the ones here are taken from it verbatim, one per shape the
+// interface has to get right.  § 4.2.1 supplies the core deterministic
+// encoding rules.  A test that passes here is a document `cbor.me`
+// renders and `ciborium` reads.
+
+use std.test
+use std.list
+use std.bytes
+use cborfmt
+use cbordec
+use cborhead
+use cborserde
+
+// A payload written the way a reader can check it against Appendix A.
+fn hex(s: Str) -> Bytes
+    bytes.from_hex(s) ?? bytes.zeros(0)
+
+// ── RFC 8949 Appendix A: the integers ───────────────────────────────
+
+@test
+fn test_the_appendix_a_unsigned_integers()
+    // 0 → 00, 1 → 01, 10 → 0a, 23 → 17: the whole head in one byte,
+    // which is what makes a small map of small integers almost free.
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborUnsigned(0), CborShortest)), "00")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborUnsigned(23), CborShortest)), "17")
+    // 24 is the first value that needs an argument byte.
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborUnsigned(24), CborShortest)), "1818")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborUnsigned(1000), CborShortest)), "1903e8")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborUnsigned(1000000), CborShortest)), "1a000f4240")
+
+@test
+fn test_the_appendix_a_negative_integers()
+    // Major type 1's argument `n` means `-1 - n`, so there is no
+    // negative zero and a one-byte head reaches -24.
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborNegative(0 - 1), CborShortest)), "20")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborNegative(0 - 24), CborShortest)), "37")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborNegative(0 - 25), CborShortest)), "3818")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborNegative(0 - 1000), CborShortest)), "3903e7")
+
+@test
+fn test_both_integer_majors_read_through_one_accessor()
+    // The split is the wire's and not the caller's.
+    match cborfmt.decode(hex("17"))
+        Err(e) => test.fail(e.message())
+        Ok(v)  =>
+            test.assert_eq(cborfmt.type_name(v), "unsigned")
+            match cborfmt.as_int(v)
+                Ok(n)   => test.assert_eq(n, 23)
+                Err(e2) => test.fail(e2.message())
+    match cborfmt.decode(hex("20"))
+        Err(e) => test.fail(e.message())
+        Ok(v)  =>
+            match cborfmt.as_int(v)
+                Ok(n)   => test.assert_eq(n, 0 - 1)
+                Err(e2) => test.fail(e2.message())
+
+@test
+fn test_an_integer_too_wide_for_a_signed_int_is_its_own_case()
+    // Appendix A has 18446744073709551615 → 1bffffffffffffffff.  It
+    // does not fit a signed Int, so `CborWideInt` carries the
+    // ARGUMENT's bit pattern and `as_int` refuses rather than handing
+    // back a negative number for a positive document.
+    match cborfmt.decode(hex("1bffffffffffffffff"))
+        Err(e) => test.fail(e.message())
+        Ok(v)  =>
+            test.assert_eq(cborfmt.type_name(v), "wide")
+            match cborfmt.as_int(v)
+                Ok(_)   => test.fail("2^64 - 1 does not fit a signed Int")
+                Err(e2) =>
+                    match e2
+                        CborWrongType(at, want, saw) => test.assert_eq(saw, "wide")
+                        _                            => test.fail("expected CborWrongType: ${e2.message()}")
+
+// ── Appendix A: the simple values and the floats ────────────────────
+
+@test
+fn test_the_appendix_a_simple_values()
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborBool(false), CborShortest)), "f4")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborBool(true), CborShortest)), "f5")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborNull, CborShortest)), "f6")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborUndefined, CborShortest)), "f7")
+    // simple(16) → f0, and simple(255) → f8ff.
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborSimple(16), CborShortest)), "f0")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborSimple(255), CborShortest)), "f8ff")
+
+@test
+fn test_null_and_undefined_are_not_the_same_value()
+    // Where CBOR is used as a patch format, null means "this member is
+    // absent" and undefined means "this member is unchanged".
+    match cborfmt.decode(hex("f6"))
+        Ok(v)  => test.assert_eq(cborfmt.type_name(v), "null")
+        Err(e) => test.fail(e.message())
+    match cborfmt.decode(hex("f7"))
+        Ok(v)  => test.assert_eq(cborfmt.type_name(v), "undefined")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_three_float_widths_stay_apart()
+    // Appendix A: 1.0 is f93c00 as a half, fa3f800000 as a single and
+    // fb3ff0000000000000 as a double.  The width is on the wire, so a
+    // value put in as a half comes back as one — and a half is three
+    // bytes where a double is nine, which is why an embedded producer
+    // sends them.
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborFloat16(1.0), CborShortest)), "f93c00")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborFloat32(1.0), CborShortest)), "fa3f800000")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborFloat64(1.0), CborShortest)), "fb3ff0000000000000")
+    match cborfmt.decode(hex("f93c00"))
+        Err(e) => test.fail(e.message())
+        Ok(v)  =>
+            test.assert_eq(cborfmt.type_name(v), "float16")
+            match cborfmt.as_float(v)
+                Ok(f)   => test.assert_eq(f, 1.0)
+                Err(e2) => test.fail(e2.message())
+
+@test
+fn test_a_boolean_reads_through_its_accessor()
+    match cborfmt.decode(hex("f5"))
+        Err(e) => test.fail(e.message())
+        Ok(v)  =>
+            match cborfmt.as_bool(v)
+                Ok(on)  => test.assert_eq(on, true)
+                Err(e2) => test.fail(e2.message())
+
+// ── Appendix A: the strings, the arrays and the maps ────────────────
+
+@test
+fn test_the_appendix_a_strings()
+    // "" → 60, "a" → 6161, "IETF" → 6449455446.
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborText(""), CborShortest)), "60")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborText("a"), CborShortest)), "6161")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborText("IETF"), CborShortest)), "6449455446")
+    // h'' → 40, h'01020304' → 4401020304.
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborBytes(hex("")), CborShortest)), "40")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborBytes(hex("01020304")), CborShortest)), "4401020304")
+
+@test
+fn test_bytes_are_not_text_even_when_their_bytes_would_be()
+    // Telling the two apart without a schema is what major type 2 is
+    // for, so an accessor that guessed would be throwing the
+    // distinction away.
+    match cborfmt.decode(hex("4161"))
+        Err(e) => test.fail(e.message())
+        Ok(v)  =>
+            test.assert_eq(cborfmt.type_name(v), "bytes")
+            match cborfmt.as_text(v)
+                Ok(_)   => test.fail("a byte string is not text")
+                Err(e2) =>
+                    match cborfmt.as_bytes(v)
+                        Ok(raw) => test.assert_eq(bytes.len(raw), 1)
+                        Err(e3) => test.fail(e3.message())
+
+@test
+fn test_the_appendix_a_arrays()
+    // [] → 80, [1, 2, 3] → 83010203.
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborArray([]), CborShortest)), "80")
+    let three = CborArray([CborUnsigned(1), CborUnsigned(2), CborUnsigned(3)])
+    test.assert_eq(bytes.to_hex(cborfmt.encode(three, CborShortest)), "83010203")
+    match cborfmt.decode(hex("83010203"))
+        Err(e) => test.fail(e.message())
+        Ok(v)  =>
+            match cborfmt.as_array(v)
+                Ok(items) => test.assert_eq(list.len(items), 3)
+                Err(e2)   => test.fail(e2.message())
+
+@test
+fn test_the_appendix_a_maps()
+    // {"a": 1} → a161610 1, and the head's argument is the PAIR count,
+    // so a map head of 1 is followed by two values.
+    let one = CborMap([CborPair { key: CborText("a"), value: CborUnsigned(1) }])
+    test.assert_eq(bytes.to_hex(cborfmt.encode(one, CborShortest)), "a1616101")
+    match cborfmt.decode(hex("a1616101"))
+        Err(e) => test.fail(e.message())
+        Ok(v)  =>
+            match cborfmt.get(v, "a")
+                Ok(got) => test.assert_eq(cborfmt.as_int(got) ?? 0, 1)
+                Err(e2) => test.fail(e2.message())
+
+@test
+fn test_a_map_key_is_any_value_and_not_only_text()
+    // Appendix A has {1: 2, 3: 4} → a201020304.  Which is why `CborMap`
+    // holds a list of pairs: a keyed collection would have had to pick
+    // a key type, and the format does not.
+    let keyed = CborMap([
+        CborPair { key: CborUnsigned(1), value: CborUnsigned(2) },
+        CborPair { key: CborUnsigned(3), value: CborUnsigned(4) }])
+    test.assert_eq(bytes.to_hex(cborfmt.encode(keyed, CborShortest)), "a201020304")
+    match cborfmt.decode(hex("a201020304"))
+        Err(e) => test.fail(e.message())
+        Ok(v)  =>
+            match cborfmt.as_map(v)
+                Ok(entries) => test.assert_eq(list.len(entries), 2)
+                Err(e2)     => test.fail(e2.message())
+
+// ── Indefinite lengths ──────────────────────────────────────────────
+
+@test
+fn test_an_indefinite_array_decodes_to_the_same_value_as_a_definite_one()
+    // Appendix A: (_ 1, 2, 3) → 9f010203ff.  A value tree has nowhere
+    // to put "this array's length was not announced", so the two
+    // decode alike — and re-encoding produces the definite form.
+    match cborfmt.decode(hex("9f010203ff"))
+        Err(e) => test.fail(e.message())
+        Ok(v)  =>
+            match cborfmt.as_array(v)
+                Ok(items) => test.assert_eq(list.len(items), 3)
+                Err(e2)   => test.fail(e2.message())
+            test.assert_eq(bytes.to_hex(cborfmt.encode(v, CborShortest)), "83010203")
+
+@test
+fn test_an_indefinite_string_is_the_concatenation_of_its_chunks()
+    // Appendix A: (_ h'0102', h'030405') → 5f42010243030405ff.
+    match cborfmt.decode(hex("5f42010243030405ff"))
+        Err(e) => test.fail(e.message())
+        Ok(v)  =>
+            match cborfmt.as_bytes(v)
+                Ok(raw) => test.assert_eq(bytes.to_hex(raw), "0102030405")
+                Err(e2) => test.fail(e2.message())
+
+@test
+fn test_a_chunk_of_the_wrong_major_type_is_refused()
+    // RFC 8949 § 3.2.3 requires every chunk of an indefinite string to
+    // have the string's own major type.  5f opens a byte string; 61 is
+    // a text chunk.
+    match cborfmt.decode(hex("5f6161ff"))
+        Ok(_)  => test.fail("a text chunk does not belong in a byte string")
+        Err(e) =>
+            match e
+                CborBadChunk(at, major) => test.assert_eq(major, 3)
+                _                       => test.fail("expected CborBadChunk: ${e.message()}")
+
+@test
+fn test_an_indefinite_head_on_a_major_type_that_cannot_have_one_is_refused()
+    // 1f is major type 0 with additional information 31, which no
+    // document may use.
+    match cborfmt.decode(hex("1f"))
+        Ok(_)  => test.fail("an integer has no indefinite form")
+        Err(e) =>
+            match e
+                CborBadIndefinite(at, major) => test.assert_eq(major, 0)
+                _                            => test.fail("expected CborBadIndefinite: ${e.message()}")
+
+@test
+fn test_a_break_with_nothing_open_is_refused()
+    match cborfmt.decode(hex("ff"))
+        Ok(_)  => test.fail("a break closes nothing here")
+        Err(e) =>
+            match e
+                CborUnexpectedBreak(at) => test.assert_eq(at, 0)
+                _                       => test.fail("expected CborUnexpectedBreak: ${e.message()}")
+
+// ── The tags a program actually meets ───────────────────────────────
+
+@test
+fn test_the_tag_numbers_are_the_registered_ones()
+    test.assert_eq(cborfmt.tag_datetime_text(), 0)
+    test.assert_eq(cborfmt.tag_datetime_epoch(), 1)
+    test.assert_eq(cborfmt.tag_bignum_unsigned(), 2)
+    test.assert_eq(cborfmt.tag_bignum_negative(), 3)
+    test.assert_eq(cborfmt.tag_decimal_fraction(), 4)
+    test.assert_eq(cborfmt.tag_bigfloat(), 5)
+    test.assert_eq(cborfmt.tag_self_described(), 55799)
+
+@test
+fn test_the_appendix_a_datetimes()
+    // 0("2013-03-21T20:04:00Z") → c074323031332d30332d32315432303a30343a30305a
+    let text = cborfmt.datetime_text_value("2013-03-21T20:04:00Z")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(text, CborShortest)),
+        "c074323031332d30332d32315432303a30343a30305a")
+    // 1(1363896240) → c11a514b67b0
+    let epoch = cborfmt.datetime_epoch_value(1363896240)
+    test.assert_eq(bytes.to_hex(cborfmt.encode(epoch, CborShortest)), "c11a514b67b0")
+
+@test
+fn test_a_datetime_reads_back_as_the_form_the_document_used()
+    // The text form is NOT parsed here: a `core` package has no
+    // calendar, and turning RFC 3339 into a civil date is calendar-nv's
+    // work.
+    match cborfmt.datetime_of(cborfmt.datetime_text_value("2013-03-21T20:04:00Z"))
+        Err(e) => test.fail(e.message())
+        Ok(d)  =>
+            match d
+                CborDateText(v)     => test.assert_eq(v, "2013-03-21T20:04:00Z")
+                CborDateEpoch(s, f) => test.fail("the document wrote tag 0")
+    match cborfmt.datetime_of(cborfmt.datetime_epoch_value(1363896240))
+        Err(e) => test.fail(e.message())
+        Ok(d)  =>
+            match d
+                CborDateEpoch(s, f) => test.assert_eq(s, 1363896240)
+                CborDateText(v)     => test.fail("the document wrote tag 1")
+
+@test
+fn test_the_appendix_a_bignum()
+    // 2(h'000001 0000000000000000') → c249010000000000000000, which is
+    // 18446744073709551616 — the first value past a 64-bit unsigned.
+    let n = CborBigNum { magnitude: hex("010000000000000000"), negative: false }
+    test.assert_eq(bytes.to_hex(cborfmt.encode(cborfmt.bignum_value(n), CborShortest)),
+        "c249010000000000000000")
+    match cborfmt.bignum_of(cborfmt.bignum_value(n))
+        Err(e)   => test.fail(e.message())
+        Ok(back) =>
+            test.assert_eq(bytes.to_hex(back.magnitude), "010000000000000000")
+            test.assert_eq(back.negative, false)
+
+@test
+fn test_a_negative_bignum_uses_the_same_fold_as_major_type_one()
+    // Tag 3's byte string `n` stands for `-1 - n`, which is why the two
+    // signs are not symmetric around zero.  Appendix A:
+    // 3(h'010000000000000000') → c349010000000000000000.
+    let n = CborBigNum { magnitude: hex("010000000000000000"), negative: true }
+    test.assert_eq(bytes.to_hex(cborfmt.encode(cborfmt.bignum_value(n), CborShortest)),
+        "c349010000000000000000")
+
+@test
+fn test_the_appendix_a_decimal_fraction()
+    // 4([-2, 27315]) → c48221196ab3, which is 273.15.
+    let d = CborDecimal {
+        exponent: 0 - 2,
+        mantissa: CborBigNum { magnitude: hex("6ab3"), negative: false } }
+    test.assert_eq(bytes.to_hex(cborfmt.encode(cborfmt.decimal_value(d), CborShortest)),
+        "c48221196ab3")
+    match cborfmt.decimal_of(cborfmt.decimal_value(d))
+        Ok(back) => test.assert_eq(back.exponent, 0 - 2)
+        Err(e)   => test.fail(e.message())
+
+@test
+fn test_tags_nest_and_untagged_removes_all_of_them()
+    // A file on disk is usually tag 55799 around whatever it holds, and
+    // a timestamp inside it is tag 0 around a text string.  A caller
+    // that wants the value rather than its provenance would otherwise
+    // write the unwrapping loop itself.
+    let doc = CborTagged(55799, CborTagged(0, CborText("1970-01-01T00:00:00Z")))
+    test.assert_eq(cborfmt.type_name(doc), "tag")
+    test.assert_eq(cborfmt.type_name(cborfmt.untagged(doc)), "text")
+    // A value with no tag on it comes back as itself.
+    test.assert_eq(cborfmt.type_name(cborfmt.untagged(CborNull)), "null")
+
+@test
+fn test_a_tag_whose_payload_is_the_wrong_shape_is_refused()
+    // A bignum is a byte string; this one is tagged around an integer.
+    match cborfmt.bignum_of(CborTagged(2, CborUnsigned(1)))
+        Ok(_)  => test.fail("a bignum is a byte string")
+        Err(e) =>
+            match e
+                CborBadTagPayload(at, tag) => test.assert_eq(tag, 2)
+                _                          => test.fail("expected CborBadTagPayload: ${e.message()}")
+
+// ── Core deterministic encoding, as a named mode ────────────────────
+
+@test
+fn test_canonical_mode_sorts_map_keys_by_their_encoded_bytes()
+    // RFC 8949 § 4.2.1.  Two programs that agree on this produce
+    // byte-identical documents for equal values, which is what lets a
+    // CBOR document be hashed, signed or used as a cache key.
+    //
+    // "b" encodes to 6162 and "a" to 6161, so the canonical order puts
+    // "a" first whatever order the tree holds.
+    let doc = CborMap([
+        CborPair { key: CborText("b"), value: CborUnsigned(2) },
+        CborPair { key: CborText("a"), value: CborUnsigned(1) }])
+    test.assert_eq(bytes.to_hex(cborfmt.encode(doc, CborShortest)), "a2616202616101")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(doc, CborCanonical)), "a2616101616202")
+
+@test
+fn test_canonical_mode_shrinks_a_float_that_round_trips_narrower()
+    // 1.0 is exact as a half, so the deterministic encoding writes
+    // three bytes where the tree said nine.
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborFloat64(1.0), CborCanonical)), "f93c00")
+    // And leaves alone one that does not: 1.1 is not exact in any
+    // narrower width.
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborFloat64(1.1), CborCanonical)), "fb3ff199999999999a")
+
+@test
+fn test_is_canonical_is_what_a_verifier_asks_before_it_hashes()
+    match cborfmt.is_canonical(hex("a2616101616202"))
+        Ok(yes) => test.assert_eq(yes, true)
+        Err(e)  => test.fail(e.message())
+    match cborfmt.is_canonical(hex("a2616202616101"))
+        Ok(yes) => test.assert_eq(yes, false)
+        Err(e)  => test.fail(e.message())
+
+// ── Refusals ────────────────────────────────────────────────────────
+
+@test
+fn test_the_reserved_additional_information_is_refused()
+    // Major type 7 with additional information 28, 29 or 30 is
+    // reserved by RFC 8949 § 3 and no document may use it.
+    match cborfmt.decode(hex("fc"))
+        Ok(_)  => test.fail("additional information 28 is reserved")
+        Err(e) =>
+            match e
+                CborReservedInfo(at, info) => test.assert_eq(info, 28)
+                _                          => test.fail("expected CborReservedInfo: ${e.message()}")
+
+@test
+fn test_a_truncated_value_names_what_it_still_needed()
+    // 0x19 says "two more bytes"; one arrives.
+    match cborfmt.decode(hex("1903"))
+        Ok(_)  => test.fail("a two-byte argument is two bytes")
+        Err(e) =>
+            match e
+                CborTruncated(at, need) => test.assert_eq(need, 1)
+                _                       => test.fail("expected CborTruncated: ${e.message()}")
+
+@test
+fn test_text_that_is_not_utf8_is_refused()
+    // 0x61 is a one-byte text string; 0xff is not a UTF-8 sequence.  A
+    // byte string has no such rule, which is what a byte string is for.
+    match cborfmt.decode(hex("61ff"))
+        Ok(_)  => test.fail("0xff is not UTF-8")
+        Err(e) =>
+            match e
+                CborBadUtf8(at) => test.assert_eq(at, 1)
+                _               => test.fail("expected CborBadUtf8: ${e.message()}")
+
+@test
+fn test_bytes_after_the_value_are_refused_by_decode()
+    match cborfmt.decode(hex("f6f6"))
+        Ok(_)  => test.fail("two nulls are two documents")
+        Err(e) =>
+            match e
+                CborTrailingBytes(at, len) =>
+                    test.assert_eq(at, 1)
+                    test.assert_eq(len, 1)
+                _                          => test.fail("expected CborTrailingBytes: ${e.message()}")
+
+@test
+fn test_decode_prefix_reads_one_document_of_a_sequence()
+    // RFC 8742 calls this a CBOR sequence: one document after another
+    // with nothing between them, which works because a document's end
+    // is wherever its outermost value ended.
+    match cborfmt.decode_prefix(hex("f6f5"))
+        Err(e) => test.fail(e.message())
+        Ok(p)  =>
+            test.assert_eq(p.consumed, 1)
+            test.assert_eq(cborfmt.type_name(p.value), "null")
+
+@test
+fn test_nesting_past_the_limit_is_refused_rather_than_recursed()
+    test.assert_eq(cborfmt.default_depth_limit(), 64)
+    let shallow = cbordec.with_depth_limit(cbordec.decoder(), 2)
+    match cbordec.feed(shallow, hex("818181f6"))
+        Ok(_)  => test.fail("three levels is past a limit of two")
+        Err(e) =>
+            match e
+                CborDepthExceeded(at, depth) => test.assert_eq(depth, 2)
+                _                            => test.fail("expected CborDepthExceeded: ${e.message()}")
+
+// ── Sizing, and writing into a buffer the caller owns ───────────────
+
+@test
+fn test_encoded_len_is_exact_in_both_modes()
+    // Sorting a map's keys changes their order and never their sizes.
+    test.assert_eq(cborfmt.encoded_len(CborNull, CborShortest), 1)
+    test.assert_eq(cborfmt.encoded_len(CborUnsigned(23), CborShortest), 1)
+    test.assert_eq(cborfmt.encoded_len(CborUnsigned(24), CborShortest), 2)
+    test.assert_eq(cborfmt.encoded_len(CborText("IETF"), CborShortest), 5)
+    let doc = CborMap([
+        CborPair { key: CborText("b"), value: CborUnsigned(2) },
+        CborPair { key: CborText("a"), value: CborUnsigned(1) }])
+    test.assert_eq(cborfmt.encoded_len(doc, CborShortest), cborfmt.encoded_len(doc, CborCanonical))
+
+@test
+fn test_the_initial_byte_is_answerable_without_encoding()
+    test.assert_eq(cborfmt.initial_byte(CborNull), 0xF6)
+    test.assert_eq(cborfmt.initial_byte(CborUnsigned(0)), 0x00)
+    test.assert_eq(cborfmt.initial_byte(CborArray([])), 0x80)
+
+@test
+fn test_encode_into_writes_into_the_callers_buffer()
+    var dst = bytes.cursor_le(bytes.zeros(8))
+    let three = CborArray([CborUnsigned(1), CborUnsigned(2), CborUnsigned(3)])
+    match cborfmt.encode_into(three, CborShortest, dst)
+        Err(e) => test.fail(e.message())
+        Ok(n)  =>
+            test.assert_eq(n, 4)
+            test.assert_eq(bytes.to_hex(bytes.slice(dst.finish(), 0, n)), "83010203")
+
+@test
+fn test_encode_into_refuses_a_buffer_smaller_than_the_answer()
+    var dst = bytes.cursor_le(bytes.zeros(2))
+    let three = CborArray([CborUnsigned(1), CborUnsigned(2), CborUnsigned(3)])
+    match cborfmt.encode_into(three, CborShortest, dst)
+        Ok(_)  => test.fail("four bytes do not fit two")
+        Err(e) =>
+            match e
+                CborBufferTooSmall(need, have) =>
+                    test.assert_eq(need, 4)
+                    test.assert_eq(have, 2)
+                _                              => test.fail("expected CborBufferTooSmall: ${e.message()}")
+
+// ── The stream, fed a chunk at a time ───────────────────────────────
+
+@test
+fn test_a_value_split_across_chunks_finishes_on_the_chunk_that_completes_it()
+    let d0 = cbordec.decoder()
+    test.assert_eq(cbordec.pending(d0), 0)
+    test.assert_eq(cbordec.stream_at(d0), 0)
+
+    match cbordec.feed(d0, hex("8201"))
+        Err(e)    => test.fail(e.message())
+        Ok(first) =>
+            test.assert_eq(list.len(first.values), 0)
+            test.assert_eq(cbordec.pending(first.decoder), 2)
+            match cbordec.feed(first.decoder, hex("02"))
+                Err(e2)    => test.fail(e2.message())
+                Ok(second) =>
+                    test.assert_eq(list.len(second.values), 1)
+                    test.assert_eq(cbordec.pending(second.decoder), 0)
+                    test.assert_eq(cbordec.stream_at(second.decoder), 3)
+
+@test
+fn test_one_chunk_carrying_a_sequence_drains_all_of_it()
+    match cbordec.feed(cbordec.decoder(), hex("f6f5f4"))
+        Err(e) => test.fail(e.message())
+        Ok(f)  => test.assert_eq(list.len(f.values), 3)
+
+@test
+fn test_the_decoder_says_whether_it_saw_an_indefinite_length()
+    // The tree collapses the form, so re-encoding produces different
+    // bytes.  A caller verifying a signature over the original bytes
+    // has to know, and this is what tells it.
+    match cbordec.feed(cbordec.decoder(), hex("9f010203ff"))
+        Err(e) => test.fail(e.message())
+        Ok(f)  => test.assert_eq(cbordec.saw_indefinite(f.decoder), true)
+    match cbordec.feed(cbordec.decoder(), hex("83010203"))
+        Err(e) => test.fail(e.message())
+        Ok(f)  => test.assert_eq(cbordec.saw_indefinite(f.decoder), false)
+
+@test
+fn test_an_indefinite_item_the_producer_never_closed_is_caught_at_finish()
+    // The bytes look fine and the value never arrives, which is exactly
+    // the case a caller most wants told about.
+    match cbordec.feed(cbordec.decoder(), hex("9f0102"))
+        Err(e) => test.fail(e.message())
+        Ok(f)  =>
+            match cbordec.finish(f.decoder)
+                Ok(_)   => test.fail("the array was never closed")
+                Err(e2) =>
+                    match e2
+                        CborTruncated(at, need) => test.assert_eq(need, 1)
+                        _                       => test.fail("expected CborTruncated: ${e2.message()}")
+
+@test
+fn test_a_clean_stream_finishes_without_complaint()
+    match cbordec.feed(cbordec.decoder(), hex("f6"))
+        Err(e) => test.fail(e.message())
+        Ok(f)  =>
+            match cbordec.finish(f.decoder)
+                Ok(d)   => test.assert_eq(cbordec.pending(d), 0)
+                Err(e2) => test.fail(e2.message())
+
+// ── The head codec, which is the half a device can use ──────────────
+
+@test
+fn test_the_major_types_are_rfc_8949_section_three()
+    test.assert_eq(cborhead.major_unsigned(), 0)
+    test.assert_eq(cborhead.major_negative(), 1)
+    test.assert_eq(cborhead.major_bytes(), 2)
+    test.assert_eq(cborhead.major_text(), 3)
+    test.assert_eq(cborhead.major_array(), 4)
+    test.assert_eq(cborhead.major_map(), 5)
+    test.assert_eq(cborhead.major_tag(), 6)
+    test.assert_eq(cborhead.major_simple(), 7)
+    test.assert_eq(cborhead.break_byte(), 0xFF)
+
+@test
+fn test_the_head_arithmetic_is_answerable_without_encoding()
+    test.assert_eq(cborhead.head_len(0), 1)
+    test.assert_eq(cborhead.head_len(23), 1)
+    test.assert_eq(cborhead.head_len(24), 2)
+    test.assert_eq(cborhead.head_len(256), 3)
+    test.assert_eq(cborhead.head_len(65536), 5)
+    test.assert_eq(cborhead.initial_byte(cborhead.major_array(), 2), 0x82)
+    test.assert_eq(cborhead.initial_byte(cborhead.major_unsigned(), 24), 0x18)
+
+@test
+fn test_the_negative_fold_has_no_negative_zero()
+    // -1 folds to 0, which is why a one-byte head reaches -24 and not
+    // -23.
+    test.assert_eq(cborhead.negative_arg(0 - 1), 0)
+    test.assert_eq(cborhead.negative_value(0), 0 - 1)
+    test.assert_eq(cborhead.negative_arg(0 - 24), 23)
+    test.assert_eq(cborhead.negative_value(23), 0 - 24)
+
+@test
+fn test_a_head_is_scanned_a_byte_at_a_time()
+    // Which is the shape a device reading from a UART has.
+    let s0 = cborhead.scan()
+    test.assert_eq(s0.seen, 0)
+    test.assert_eq(cborhead.scan_need(s0), 1)
+
+    // 0x19 0x03 0xe8 is 1000 in a three-byte head.
+    let a = cborhead.push(s0, 0x19 as u8)
+    test.assert_eq(a.done, false)
+    test.assert_eq(cborhead.scan_need(a), 2)
+    let b = cborhead.push(a, 0x03 as u8)
+    let c = cborhead.push(b, 0xE8 as u8)
+    test.assert_eq(c.done, true)
+    test.assert_eq(c.major, cborhead.major_unsigned())
+    test.assert_eq(c.arg, 1000)
+
+@test
+fn test_a_one_byte_head_is_done_on_its_first_byte()
+    let s = cborhead.push(cborhead.scan(), 0x01 as u8)
+    test.assert_eq(s.done, true)
+    test.assert_eq(s.arg, 1)
+    test.assert_eq(s.indefinite, false)
+
+@test
+fn test_an_indefinite_head_says_so_and_carries_no_argument()
+    let s = cborhead.push(cborhead.scan(), 0x9F as u8)
+    test.assert_eq(s.done, true)
+    test.assert_eq(s.indefinite, true)
+    test.assert_eq(s.major, cborhead.major_array())
+
+@test
+fn test_the_scan_latches_a_reserved_additional_information()
+    // A `@value` function has nowhere to put a refusal, so the refusal
+    // is carried on the value.
+    let s = cborhead.push(cborhead.scan(), 0xFC as u8)
+    test.assert_eq(s.bad, true)
+
+@test
+fn test_the_head_emitter_writes_what_the_scanner_reads()
+    let head = cborhead.emit_head(cborhead.major_array(), 2)
+    test.assert_eq(head.ok, true)
+    test.assert_eq(head.len, 1)
+    test.assert_eq(head.out[0] as Int, 0x82)
+
+    let wide = cborhead.emit_head(cborhead.major_unsigned(), 1000)
+    test.assert_eq(wide.len, 3)
+    test.assert_eq(wide.out[0] as Int, 0x19)
+
+    let open = cborhead.emit_indefinite(cborhead.major_array())
+    test.assert_eq(open.len, 1)
+    test.assert_eq(open.out[0] as Int, 0x9F)
+    // An integer has no indefinite form.
+    test.assert_eq(cborhead.emit_indefinite(cborhead.major_unsigned()).ok, false)
+
+    let stop = cborhead.emit_break()
+    test.assert_eq(stop.len, 1)
+    test.assert_eq(stop.out[0] as Int, 0xFF)
+
+// ── The trait bridge ────────────────────────────────────────────────
+
+struct Reading
+    sensor: Int
+    celsius: Float
+
+@test
+fn test_a_struct_writes_itself_as_a_map_keyed_by_member_name()
+    match cborserde.to_bytes(Reading { sensor: 3, celsius: 21.5 })
+        Err(e) => test.fail(e.message())
+        Ok(b)  =>
+            test.assert_eq(bytes.to_hex(b), "a26673656e736f72036763656c73697573fb4035800000000000")
+
+@test
+fn test_a_struct_reads_itself_back_which_postcard_cannot_do()
+    // The whole difference is that the wire carries the names: `field`
+    // scans the map at the parent's own offset, so the parent never has
+    // to be advanced and the trait's unthreaded cursor is enough.
+    let raw = hex("a26673656e736f72036763656c73697573fb4035800000000000")
+    let r: Result<Reading, DeserializeError> = cborserde.from_bytes(raw)
+    match r
+        Err(e) => test.fail(e.message())
+        Ok(x)  =>
+            test.assert_eq(x.sensor, 3)
+            test.assert_eq(x.celsius, 21.5)
+
+@test
+fn test_an_emitter_accumulates_and_answers_bytes_without_a_result()
+    // Everything the `Serializer` trait can present has a CBOR
+    // encoding, which is why this answers `Bytes` where postcard-nv's
+    // answers a `Result`.
+    let w = cborserde.emitter()
+    test.assert_eq(bytes.len(cborserde.emitter_bytes(w)), 0)
+
+@test
+fn test_a_cursor_steps_over_the_self_described_tag()
+    // A file on disk usually carries tag 55799, and a reader that
+    // refused it would refuse every CBOR file it was handed.
+    let c = cborserde.cursor(hex("d9d9f7f6"))
+    test.assert_eq(cborserde.cursor_at(c), 3)

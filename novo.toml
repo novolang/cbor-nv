@@ -1,0 +1,47 @@
+[package]
+name        = "cbor-nv"
+version     = "0.0.1"
+description = "RFC 8949 CBOR: all seven major types, definite and indefinite lengths, the tags a program actually meets, and core deterministic encoding as a named mode.  A value tree, an encoder into a caller's buffer, a feed-and-drain decoder, a serde bridge, and a head codec that allocates nothing and builds for a microcontroller.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`: arithmetic over bytes the caller already holds.  No function
+# declares an effect — a wire format has nowhere to put one, and the
+# epoch timestamps in tag 1 take their seconds as a parameter because a
+# `core` package has no clock.
+#
+# It carries `tests/embedded_probe.nv`, so the device claim is BUILT —
+# for `cborhead`, which is the half a microcontroller can use.  The
+# grid's row for this package says the embedded tier prefers CBOR, and
+# a claim that was only asserted would not be worth the sentence.
+layer       = "core"
+
+category    = "data"
+
+tags        = ["cbor", "rfc8949", "serde", "wire-format", "streaming", "embedded", "sans-io"]
+repository  = "https://github.com/novolang/cbor-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+[docs.pages]
+"README.md" = "The binary JSON an embedded producer reaches for"
+
+[dependencies]
+# None, and two of them are worth saying out loud.
+#
+# NOT leb128-nv or zigzag-nv.  CBOR's argument is BIG-ENDIAN FIXED
+# WIDTH — zero, one, two, four or eight bytes chosen by the low five
+# bits of the initial byte — and not a variable-length quantity at all.
+# The two varint packages are postcard-nv's dependencies for a reason
+# that does not apply here.
+#
+# NOT serde-nv.  The `Serializer` and `Deserializer` traits this
+# package implements are the STANDARD LIBRARY's (`std.serialize`), not
+# that package's, and depending on it would put a second CBOR
+# implementation in every consumer's assembly.

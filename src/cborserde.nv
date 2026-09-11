@@ -1,0 +1,332 @@
+// cborserde — the bridge to the standard library's serialization
+// traits, so a novo-lang struct writes and reads itself as CBOR.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// BOTH HALVES ARE WRITABLE TODAY, for the same reason msgpack-nv's are
+// and postcard-nv's read half is not: CBOR is self-describing.
+//
+//   * postcard's `Deserializer` cannot be written because `field(self,
+//     name)` answers a CHILD cursor and leaves the parent unchanged,
+//     and a nameless format's member 2 begins wherever member 1 ended —
+//     which the parent has no way to learn.  CBOR writes a key in front
+//     of every member, so `field("beta")` SCANS the map at the parent's
+//     own offset and needs no threading at all.
+//   * postcard cannot write a `Some` because the trait announces `None`
+//     (as `put_null`) and announces `Some` not at all.  CBOR needs no
+//     discriminant: `null` is `0xf6` and is distinguishable from every
+//     other value by its own head, so `None` is `put_null` and
+//     `Some(x)` is `x`.
+//
+// WHERE IT IS STILL SHORT OF THE FORMAT is real but narrower, and every
+// case has the value tree in `cborfmt` as its answer: the trait has ONE
+// integer hook, ONE float hook, NO bytes hook, no way to write a tag,
+// and no way to open a map whose keys are not text.  The README lists
+// them.
+//
+// THE TYPE NAMES.  serde-nv's CBOR module already declares `CborWriter`
+// and `CborReader`, and a public type name is unique across the whole
+// assembly, so these are `CborEmitter` and `CborCursor`.  The second is
+// the better name anyway — it IS an offset cursor, and saying so is
+// what tells a reader why the impl works.
+
+// A CBOR document being built.
+//
+// `out` accumulates byte values because a `Serializer` is THREADED
+// rather than mutated — every method takes the writer and returns it —
+// and because the runtime's `Bytes` cannot be appended to element by
+// element.  A caller who needs the finished bytes calls
+// `emitter_bytes`.
+//
+// `depth` is carried so that a type nested past the decoder's limit is
+// refused on the way OUT as well as on the way in; a writer that
+// happily produced a document nothing can read would be a strange thing
+// to have.
+pub struct CborEmitter
+    out: [Int]
+    depth: Int
+
+// A cursor into a CBOR document: an OFFSET, not a parsed tree.
+//
+// `at` is the byte the next read starts at and `path` is the route from
+// the document's root, which `DeserializeError` needs.  Unlike a
+// nameless format's reader, this one does not need the walk to thread
+// its position: every member is found by scanning the map at `at` for
+// its key, so the parent stays exactly where it was and answers the
+// same question again for the next member.
+//
+// That is the whole reason this impl can be written and postcard's
+// cannot.
+pub struct CborCursor
+    src: Bytes
+    at: Int
+    path: Str
+
+// A fresh emitter with nothing in it.
+pub fn emitter() -> CborEmitter
+    todo("cborserde.emitter")
+
+// The bytes an emitter accumulated.
+//
+// Cannot fail: everything the `Serializer` trait can present has a CBOR
+// encoding, which is the difference from postcard-nv's `writer_bytes`
+// and the reason this one answers `Bytes` rather than a `Result`.
+//
+// The output is `CborShortest` and not `CborCanonical`: the trait
+// presents members in declaration order and gives the format no chance
+// to sort them, so a caller who needs the deterministic encoding
+// decodes and re-encodes with `cborfmt`.  That is a real cost of the
+// bridge and the README says so.
+pub fn emitter_bytes(w: CborEmitter) -> Bytes
+    todo("cborserde.emitter_bytes")
+
+// A fresh cursor over `src`, positioned at the document's root.
+//
+// Tags on the outermost value are stepped over, so a document wrapped
+// in tag 55799 — self-described CBOR, which is what a file on disk
+// usually carries — reads as the type inside it.
+pub fn cursor(src: Bytes) -> CborCursor
+    todo("cborserde.cursor")
+
+// The byte offset `c` reads from.
+//
+// A caller reading an RFC 8742 sequence of documents out of one buffer
+// uses it to find the next one; a caller reading one document uses
+// `cborfmt.decode` and never needs it.
+pub fn cursor_at(c: CborCursor) -> Int
+    todo("cborserde.cursor_at")
+
+// The format side, so a novo-lang struct or enum writes itself.
+//
+// A struct becomes a `map` whose keys are the member names, which is
+// what COSE, CWT and every other CBOR profile a novo-lang program will
+// meet does with a schema it expects a reader to have, and what makes
+// the output readable by a peer that has never seen the type.
+//
+// The alternative — a struct as an `array` of its members in
+// declaration order — is what a size-constrained profile does, and it
+// is deliberately NOT what this does: the trait gives the reader no way
+// to know which convention the writer chose, so a package with both
+// would produce documents that decode as the wrong shape with no
+// diagnostic.  A caller who wants the array form builds a `CborArray`.
+impl Serializer for CborEmitter
+    // `0xf6`.  The whole of CBOR's optional handling on the write side,
+    // because `Some(x)` is `x`.
+    fn put_null(self) -> CborEmitter
+        todo("cborserde.CborEmitter.put_null")
+
+    // `0xf4` and `0xf5`.
+    fn put_bool(self, v: Bool) -> CborEmitter
+        todo("cborserde.CborEmitter.put_bool")
+
+    // Major type 0 for a non-negative value and major type 1 for a
+    // negative one, with the shortest argument in both cases.
+    //
+    // An unsigned value at or above 2^63 is unreachable from here —
+    // there is one integer hook and novo-lang has one integer type — so
+    // a document with one is built with `cborfmt`'s `CborWideInt`, and
+    // anything beyond 64 bits with its bignum tag.
+    fn put_int(self, v: Int) -> CborEmitter
+        todo("cborserde.CborEmitter.put_int")
+
+    // Additional information 27: a double, always.
+    //
+    // Not the narrowest float that round-trips, which is what
+    // `CborCanonical` would write.  The trait has one float hook and
+    // the emitter has no way to know the caller wanted the shorter
+    // form, so half precision — three bytes for a temperature, against
+    // nine — is reached through `cborfmt`'s `CborFloat16`.
+    fn put_float(self, v: Float) -> CborEmitter
+        todo("cborserde.CborEmitter.put_float")
+
+    // Major type 3, with the shortest length head.
+    //
+    // Note what is NOT here: a hook for `Bytes`.  Major type 2 is
+    // unreachable through this trait, so a member that is really bytes
+    // travels as text of whatever the caller encoded it to — base64,
+    // hex — or the document is built with `cborfmt`'s `CborBytes`.
+    fn put_str(self, v: Str) -> CborEmitter
+        todo("cborserde.CborEmitter.put_str")
+
+    // The map head for `n` members.  `name` is not written: a CBOR map
+    // has no type tag, and a profile that wants one wraps the value in
+    // a tag, which this trait has no hook for either.
+    fn begin_struct(self, name: Str, n: Int) -> CborEmitter
+        todo("cborserde.CborEmitter.begin_struct")
+
+    // The member's name, as a text key.  The value the walk writes next
+    // is the entry's value.
+    fn field(self, name: Str) -> CborEmitter
+        todo("cborserde.CborEmitter.field")
+
+    // Nothing: the head already said how many entries there were, so a
+    // definite-length CBOR map has no terminator.
+    fn end_struct(self) -> CborEmitter
+        todo("cborserde.CborEmitter.end_struct")
+
+    // The array head for `n` elements.
+    fn begin_seq(self, n: Int) -> CborEmitter
+        todo("cborserde.CborEmitter.begin_seq")
+
+    // Nothing: elements are told apart by position, and the head said
+    // how many there are.
+    fn elem(self) -> CborEmitter
+        todo("cborserde.CborEmitter.elem")
+
+    fn end_seq(self) -> CborEmitter
+        todo("cborserde.CborEmitter.end_seq")
+
+    // A one-entry map from the variant name to its payload — the
+    // externally tagged form, which is what the trait's own default
+    // pair produces and what the standard library's walk reads back.
+    //
+    // `index` is ignored on purpose.  A variant index is smaller and is
+    // what a constrained CBOR profile would write, and it is also what
+    // turns reordering an enum's variants into a silent
+    // wire-compatibility break.  A self-describing format can afford
+    // the name, so it spends it.
+    fn begin_variant(self, enum_name: Str, variant: Str, index: Int, n: Int) -> CborEmitter
+        todo("cborserde.CborEmitter.begin_variant")
+
+    fn end_variant(self) -> CborEmitter
+        todo("cborserde.CborEmitter.end_variant")
+
+// The cursor side, so a novo-lang struct or enum reads itself.
+//
+// Every method is writable today.  `field` scans the map at `at` for
+// the key and answers a cursor positioned at its value; the parent is
+// unchanged and is asked again for the next member, which is exactly
+// what a self-describing format makes possible and a nameless one does
+// not.
+//
+// Every read steps over any tags in front of the value it wants, so a
+// member wrapped in tag 0 reads as the text inside it.  A caller who
+// needs the tag itself reads the document with `cborfmt`.
+impl Deserializer for CborCursor
+    // The member named `name`, or a `DeserializeError` whose path says
+    // where it was looked for.
+    //
+    // Scans the map at `at` and does not advance the parent.  The scan
+    // is why a struct of `n` members costs O(n^2) key comparisons; for
+    // the member counts a struct actually has, that is cheaper than the
+    // index it would take to avoid it.
+    //
+    // An indefinite-length map is scanned the same way, to its break.
+    fn field(self, name: Str) -> Result<CborCursor, DeserializeError>
+        todo("cborserde.CborCursor.field")
+
+    // The member named `name` when it is present and not `null`.
+    //
+    // A missing key and a key whose value is `0xf6` are the same
+    // answer, which lets a writer drop `None` members without changing
+    // what a reader sees.  `0xf7`, undefined, is NOT the same answer:
+    // a profile that distinguishes absent from unchanged is entitled to
+    // have that distinction survive.
+    fn opt_field(self, name: Str) -> ?CborCursor
+        todo("cborserde.CborCursor.opt_field")
+
+    // The text keys of the map at `at`, in document order.
+    //
+    // Unlike postcard-nv's, this one answers something: the wire
+    // carries the names.  It is what the standard library's externally
+    // tagged enum reader uses to find the variant name.  Non-text keys
+    // are skipped rather than rendered, because there is no spelling
+    // for them here that a caller could use.
+    fn keys(self) -> [Str]
+        todo("cborserde.CborCursor.keys")
+
+    fn seq_len(self) -> Result<Int, DeserializeError>
+        todo("cborserde.CborCursor.seq_len")
+
+    // Element `i`, found by skipping elements 0 through `i - 1`.
+    //
+    // CBOR writes no offsets, so this re-scans and a walk over every
+    // element costs O(n^2).  Skipping an element needs only its head,
+    // so the scan is a head walk rather than a decode.
+    fn seq_at(self, i: Int) -> Result<CborCursor, DeserializeError>
+        todo("cborserde.CborCursor.seq_at")
+
+    // Whether the value at `at` is `0xf6`.
+    fn is_null(self) -> Bool
+        todo("cborserde.CborCursor.is_null")
+
+    fn get_bool(self) -> Result<Bool, DeserializeError>
+        todo("cborserde.CborCursor.get_bool")
+
+    // The integer at `at`, from major type 0 or 1.
+    //
+    // A value that does not fit a signed `Int` is a `DeserializeError`
+    // rather than a wrapped number: the trait's one integer hook has
+    // nowhere to put the bit pattern, and a caller who needs it reads
+    // the document with `cborfmt` instead.
+    fn get_int(self) -> Result<Int, DeserializeError>
+        todo("cborserde.CborCursor.get_int")
+
+    // The float at `at`, from any of the three widths.
+    fn get_float(self) -> Result<Float, DeserializeError>
+        todo("cborserde.CborCursor.get_float")
+
+    // The text at `at`, definite or indefinite.
+    //
+    // A byte string is NOT accepted, even when its bytes are valid
+    // UTF-8: the document said it was bytes, and the whole point of the
+    // major-type split is that a reader does not have to guess.
+    fn get_str(self) -> Result<Str, DeserializeError>
+        todo("cborserde.CborCursor.get_str")
+
+    fn fail(self, reason: Str) -> DeserializeError
+        todo("cborserde.CborCursor.fail")
+
+// Write any serializable value as CBOR bytes.
+//
+// The one call the trait surface exists for.  It answers a `Result`
+// only for the depth limit — a type that nests deeper than a decoder
+// will read — because every other member the walk can present has an
+// encoding here.
+//
+// ```novo
+// use std.bytes
+// use cborserde
+//
+// struct Reading
+//     sensor: Int
+//     celsius: Float
+//
+// fn main() [io]
+//     match cborserde.to_bytes(Reading { sensor: 3, celsius: 21.5 })
+//         Ok(b)  => println(bytes.to_hex(b))
+//         Err(e) => println(e.message())
+// ```
+pub fn to_bytes<T: Serialize>(v: T) -> Result<Bytes, CborError>
+    todo("cborserde.to_bytes")
+
+// Read CBOR bytes back into any deserializable type.
+//
+// `T` is named by nothing but the result, so the call has to sit where
+// the type is known — a binding with an annotation, or a return
+// position.  The error is the standard library's `DeserializeError`
+// rather than this package's, because that is what the trait returns
+// and a walk forty members deep is exactly the case its `path` is for.
+//
+// Bytes left over are NOT an error here: a caller decoding one document
+// from one buffer checks `cursor_at` against the buffer's length, and a
+// caller reading a stream wants `cbordec`.
+//
+// ```novo
+// use std.bytes
+// use cborserde
+//
+// struct Reading
+//     sensor: Int
+//     celsius: Float
+//
+// fn main() [io]
+//     let raw = bytes.from_hex("a26673656e736f72036763656c73697573fb4035800000000000") ?? bytes.zeros(0)
+//     let r: Result<Reading, DeserializeError> = cborserde.from_bytes(raw)
+//     match r
+//         Ok(x)  => println("${x.sensor}")
+//         Err(e) => println(e.message())
+// ```
+pub fn from_bytes<T: Deserialize>(src: Bytes) -> Result<T, DeserializeError>
+    todo("cborserde.from_bytes")
