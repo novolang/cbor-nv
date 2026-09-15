@@ -1,224 +1,326 @@
 # cbor-nv
 
-**Status: NOT IMPLEMENTED — interface only.**
+The Concise Binary Object Representation (CBOR) is a binary data format
+for small messages and small code, specified in
+[RFC 8949](https://www.rfc-editor.org/rfc/rfc8949). Its data model is
+JSON's, with byte strings and tagged values added. This package
+implements the format for novo-lang: a value tree, a streaming decoder,
+a bridge to the standard library's serialization traits, and a head
+codec that builds for a microcontroller. It depends on nothing.
 
-Every public function below is published with its signature and its
-effect row, and every body is `todo()`.  Installing this package works;
-calling it panics with `not implemented`.
+**Status: NOT IMPLEMENTED — interface only.** Every function is
+declared with its full signature, but every body is a `todo()` that
+panics when called. The package is published so its design can be
+reviewed and depended on before it is implemented. Version 0.1.0 will
+be the first working release.
 
-## What this is
+## What it is
 
-RFC 8949 CBOR: JSON's data model plus byte strings, plus tags, in a
-binary encoding where every value is three bits of major type, five bits
-of additional information and an argument.  A `{"a":1}` costs seven
-bytes as JSON and four here; a small integer costs one; and a producer
-that does not know a length in advance can say so rather than buffering
-the whole thing first.
+A CBOR document is one **data item**. Every data item begins with an
+**initial byte**: three bits of **major type**, which say what kind of
+thing follows, and five bits of **additional information**. The
+additional information is either the value itself, for the values 0 to
+23, or it announces an **argument** of one, two, four or eight further
+bytes, big-endian. RFC 8949 section 3 defines this shape, and every
+value in the format has it.
 
-Four surfaces, and a reader should know which one they are on.
-
-| surface | module | reach for it when |
+| Major type | What it holds | The argument is |
 | --- | --- | --- |
-| the **value tree** | `cborfmt` | the other end is not novo-lang, the document's shape is not a struct, or a tag is involved |
-| the **stream** | `cbordec` | the document arrives in pieces |
-| the **trait bridge** | `cborserde` | both ends are novo-lang and you would rather not write any code |
-| the **head codec** | `cborhead` | you are on a device |
+| 0 | An unsigned integer | the value |
+| 1 | A negative integer | `n`, standing for `-1 - n` |
+| 2 | A byte string | its length in bytes |
+| 3 | A text string, UTF-8 | its length in bytes |
+| 4 | An array | its element count |
+| 5 | A map | its pair count |
+| 6 | A tag | the tag number |
+| 7 | Simple values and floats | the simple value or the float |
 
-## Adding it, and checking it
+A **tag** is a number in front of one data item that says how to read
+it. RFC 8949 section 3.4 defines them, and this package reads and
+writes the ones a program meets.
 
-```bash
-novo pkg add cbor-nv          # into your novo.toml
-novo pkg build                # type- and effect-check the package
-novo test --isolate tests/cbor_tests.nv
+| Tag | Meaning |
+| --- | --- |
+| 0 | A date and time as RFC 3339 text |
+| 1 | A date and time as seconds since 1970-01-01T00:00:00Z |
+| 2 | An unsigned bignum, as a big-endian byte string |
+| 3 | A negative bignum, whose byte string `n` stands for `-1 - n` |
+| 4 | A decimal fraction: `mantissa * 10 ^ exponent` |
+| 5 | A bigfloat: the same pair, base 2 |
+| 55799 | Self-described CBOR, the three-byte file prefix `d9d9f7` |
+
+A string, an array or a map may be written with an **indefinite
+length**: additional information 31 in place of a count, then the
+contents, then the **break** byte `0xff`. RFC 8949 section 3.2 defines
+the form. A producer that does not know how long a thing will be writes
+it this way rather than buffering the whole thing first.
+
+The **core deterministic encoding** of RFC 8949 section 4.2.1 is the
+set of rules that makes two encoders produce identical bytes for equal
+values: the shortest head for every argument, definite lengths
+throughout, floats written at the narrowest width that round-trips, and
+map keys sorted by the bytes of their own encoding. A document that is
+hashed, signed or used as a cache key has to be in that form.
+
+| Quantity | Value |
+| --- | --- |
+| Head length, shortest form | 1, 2, 3, 5 or 9 bytes |
+| Argument widths | 0, 1, 2, 4 or 8 bytes |
+| Largest value in a one-byte head | 23 |
+| The break byte | `0xff` |
+| Reserved additional information | 28, 29 and 30 |
+| Indefinite-length additional information | 31 |
+| Default nesting limit for a decode | 64 |
+| Longest head an emitter writes | 9 bytes |
+
+## Install
+
+```
+novo pkg add cbor-nv
 ```
 
-`novo test` is red today and that is the point of the release: every
-assertion fails with `not implemented: cborfmt.<fn>`.  They turn green
-one at a time as bodies land.
-
-## The one example that will work
+## Example
 
 ```novo
 use std.bytes
 use cborfmt
 
 fn main() [io]
+    // A document as a tree: a map of two entries, built by hand.
     let doc = CborMap([
         CborPair { key: CborText("id"), value: CborUnsigned(7) },
         CborPair { key: CborText("ok"), value: CborBool(true) },
     ])
-    println(bytes.to_hex(cborfmt.encode(doc, CborCanonical)))
-    // a2626964 07626f6b f5 — a two-entry map in nine bytes, keys sorted
+
+    // Encode it with the deterministic rules, so the same value always
+    // gives the same bytes. The keys come out sorted.
+    let wire = cborfmt.encode(doc, CborCanonical)
+    println(bytes.to_hex(wire))
+
+    // Read the bytes back and take one entry out by its text key.
+    match cborfmt.decode(wire)
+        Err(e) => println(e.message())
+        Ok(v)  =>
+            match cborfmt.get(v, "id")
+                Err(e2) => println(e2.message())
+                Ok(id)  => println(cborfmt.type_name(id))
 ```
 
-## The device half is the point
+Build and test with `novo pkg build` and `novo test`. Today `novo test`
+fails on purpose: every test reaches a `not implemented:
+cborfmt.<fn>` panic. The tests are the specification the
+implementation will have to satisfy.
 
-The grid's row for this package says the embedded tier prefers CBOR, and
-this release makes that a claim the compiler checks rather than a
-sentence: `tests/embedded_probe.nv` compiles `cborhead` to a Cortex-M4
-ELF for `--target=nrf52-qemu`.
+## What the package contains
 
-What a device can do with a head codec alone is more than it sounds.
-RFC 8949 § 3 puts every value behind one shape — major type, additional
-information, argument — so a sensor producing CBOR writes an array head,
-then a map head and a few integer heads per reading, and **never builds a
-tree at all**.  A consumer on a device walks heads and skips what it does
-not want, using nothing but the argument in each one.  That is the whole
-of CBOR that firmware needs.
+| Module | Contents |
+| --- | --- |
+| `cborfmt` | The value tree, the tags, the errors, the accessors, the encoder and the one-shot decoder. |
+| `cbordec` | The same decoder fed a chunk at a time, for a document that arrives in pieces. |
+| `cborserde` | The bridge to `std.serialize`, so a novo-lang struct writes and reads itself as CBOR. |
+| `cborhead` | The initial byte and the argument, as a value type that allocates nothing. Builds for a microcontroller. |
 
-`cborfmt`, `cbordec` and `cborserde` are deliberately outside the probe:
-they speak `Bytes`, `Str` and a recursive value tree, the embedded
-runtime defines no `novo_bytes_*` symbol, a tree is a heap allocation per
-node, and one host-only function anywhere in a compilation unit is an
-undefined symbol at embedded link time whether or not the firmware calls
-it.
+## How to choose an entry point
 
-**msgpack-nv, this package's sibling, carries no probe**, and the split
-is on purpose: the two formats are close enough that an embedded
-producer choosing between them should choose the one that compiles.
+**`cborfmt` is the format itself.** Build a `CborValue`, encode it,
+decode bytes back into one. Use it when the other end is not novo-lang,
+when the document's shape is not a struct, or when a tag is involved.
 
-## serde-nv already has a CBOR module — why this one?
+**`cbordec` is the same decoder for a document that arrives in
+pieces.** The host feeds chunks in with `feed` and takes finished
+values out. Use it when you are reading a socket and have no whole
+document to hand over.
 
-`serde-nv`'s `cbor` module is the **subset its trait walk needs**: a
-writer that emits definite lengths for the shapes a novo-lang struct
-produces, and an offset cursor that reads them back.  Its own header
-says so — "nothing here writes an indefinite-length header".
+**`cborserde` writes a novo-lang type with no code to write.**
+`to_bytes` and `from_bytes` take any type that implements the standard
+library's `Serialize` and `Deserialize`. A struct becomes a map whose
+keys are the member names.
 
-This package is the whole of RFC 8949.  What it adds:
+**`cborhead` is the half a device can use.** It takes and returns
+integers, holds no buffer and allocates nothing. See "Running on a
+microcontroller".
 
-- **A value tree** for documents whose shape is not a struct.
-- **Indefinite lengths**, read and collapsed, which is the form a
-  streaming producer writes.
-- **The tags a program actually meets**: date/time in both forms,
-  bignums, decimal fractions, bigfloats, and the self-described prefix a
-  CBOR file on disk begins with.
-- **Half-precision floats**, which are three bytes where a double is
-  nine and are what an embedded producer sends.
-- **Core deterministic encoding** as a named mode, and `is_canonical` to
-  check a document against it.
-- **A streaming decoder**, and **a head codec that builds for a device**.
-- **Named refusals with offsets**: reserved additional information, an
-  indefinite head where none is allowed, a stray break, a mismatched
-  chunk, non-UTF-8 text, a depth limit, trailing bytes.
+## The rules a user needs
 
-Both can be in one program: the module names and the type names are
-disjoint on purpose (`cborfmt` and `CborValue` here, `cbor` and
-`CborWriter` there).  That disjointness is also why this module is not
-called `cbor` and why the trait bridge's types are `CborEmitter` and
-`CborCursor` rather than `CborWriter` and `CborReader` — a module name
-and a public type name are each unique across the whole assembly, and
-serde-nv had all three first.
+1. **An indefinite length is read and collapsed.** An indefinite array
+   decodes to `CborArray` and an indefinite byte string to the
+   concatenation of its chunks. The values round-trip and the bytes do
+   not, so a caller verifying a signature over the original bytes must
+   ask `cbordec.saw_indefinite` first. RFC 8949 section 3.2.
+2. **Nothing in `cborfmt` writes an indefinite length.** Both encoding
+   modes write definite lengths. A producer that needs the indefinite
+   form writes heads with `cborhead.emit_indefinite` and closes them
+   with `cborhead.emit_break`.
+3. **A map is a list of pairs, not a keyed collection.** A CBOR key is
+   any data item and not only a string, and a document may carry
+   duplicate keys, which RFC 8949 section 5.6 calls invalid while
+   leaving both on the wire. A validator has to be able to see both, so
+   nothing here drops one.
+4. **`cborfmt.get` looks up text keys only.** Whether the keys `1` and
+   `1.0` are the same key is left to the application by RFC 8949
+   section 5.6, so this package defines no equality over keys. A caller
+   with non-text keys walks `as_map`.
+5. **`CborCanonical` is the mode to encode in before hashing or
+   signing.** It applies the core deterministic encoding of RFC 8949
+   section 4.2.1. `CborShortest` writes the shortest heads and leaves
+   the map order alone. `cborfmt.is_canonical` checks a document that
+   arrived from somewhere else.
+6. **`CborNull` and `CborUndefined` are different values.** They are
+   major type 7 values 22 and 23. Where CBOR is used as a patch format,
+   null means the member is absent and undefined means it is unchanged.
+7. **A text string must be UTF-8 and a byte string need not be.** A
+   decoder refuses non-UTF-8 text with `CborBadUtf8`. That distinction
+   is what major type 2 exists for, and a `CborBytes` is not text even
+   when its bytes happen to be valid UTF-8.
+8. **The three float widths are kept apart.** `CborFloat16`,
+   `CborFloat32` and `CborFloat64` record the width the document used,
+   because the width is on the wire. `as_float` answers all three.
+9. **An integer too large for a signed `Int` arrives as
+   `CborWideInt`.** It carries the argument's 64-bit pattern and the
+   major type it came from, never a reinterpreted negative number. A
+   value beyond 64 bits is a bignum, tag 2 or tag 3, and `bignum_of`
+   reads it.
+10. **A decode refuses bytes after the document.** `cborfmt.decode`
+    answers `CborTrailingBytes`. A caller reading one document out of a
+    longer buffer uses `decode_prefix`, whose `consumed` field is the
+    only way to find the next one, because CBOR has no framing.
+    RFC 8742 calls that a CBOR sequence.
+11. **A decode is limited to 64 levels of nesting.** An array head is
+    one byte and opens a level, so a five-byte message can ask for
+    thousands of them. Past the limit the decoder answers
+    `CborDepthExceeded`, and `cbordec.with_depth_limit` moves the line.
+12. **Additional information 28, 29 and 30 is reserved.** RFC 8949
+    section 3 forbids it, and a document carrying it is refused with
+    `CborReservedInfo`.
+13. **Tag 0's text is handed over unparsed, and tag 1's seconds are an
+    argument.** This package has no calendar and no clock. Turning an
+    RFC 3339 string into a civil date is
+    [calendar-nv](https://novo-lang.org/packages/calendar-nv)'s work.
+14. **The serde bridge writes `CborShortest` and cannot write
+    `CborCanonical`.** The trait presents members in declaration order
+    and gives the format no chance to sort them. A caller who needs the
+    deterministic encoding decodes the bridge's output and re-encodes
+    it with `cborfmt`.
+15. **Every failure carries the byte offset it was found at.** For
+    `cbordec` that offset is counted from the start of the stream and
+    not from the start of the chunk.
 
-**This package does not depend on serde-nv.**  The `Serializer` and
-`Deserializer` traits are the standard library's (`std.serialize`), and
-a dependency would put a second CBOR implementation in every consumer's
-assembly.
+## Running on a microcontroller
 
-## Is the serde bridge writable today? Yes — both halves
+novo-lang lets a package state which of its modules can run on a device
+with no heap allocator, and the compiler checks that claim on every
+build. Here the claim covers `cborhead` and nothing else.
 
-This is the question the interface milestone exists to answer, and for
-this format the answer is yes, where for postcard-nv it was half no.
-The difference is entirely that CBOR is self-describing.
+`tests/embedded_probe.nv` is that claim as a program that either builds
+or does not. It builds today:
 
-**The read half works.**  postcard-nv's `Deserializer` cannot be written
-correctly because `field(self, name)` answers a child cursor and leaves
-the parent unchanged, and a nameless format's member 2 begins wherever
-member 1 ended — which the parent has no way to learn.  CBOR writes a
-key in front of every member, so `field("beta")` **scans the map at the
-parent's own offset** and needs no threading at all.
+```bash
+novo build --target=nrf52-qemu tests/embedded_probe.nv
+```
 
-**The write half works too.**  postcard-nv cannot write an optional
-because the trait announces `None` (as `put_null`) and announces `Some`
-not at all.  CBOR needs no discriminant: `null` is `0xf6` and is
-distinguishable from every other value by its own head, so `None` is
-`put_null` and `Some(x)` is `x`.
+The probe produces a Cortex-M4 executable that writes a map head and an
+integer head and walks a document's heads back. That is what a sensor
+producing CBOR does, and it never builds a tree at all. `CborHeadScan`
+and `CborEmit` are value structs, so they live in the caller's stack
+frame, and the emitted head is a fixed nine-byte inline array rather
+than a list.
 
-So both stdlib defects postcard-nv found are consequences of a
-**nameless, untagged** format, and a self-describing one meets neither.
+The scan takes one byte at a time, because a device reading from a UART
+has one byte and nothing else. `scan_need` says how many more bytes the
+head wants, so a caller can wait for exactly that many.
 
-## Where the trait bridge is still short of the format
+**A device cannot depend on this package as a whole.** `cborfmt`,
+`cbordec` and `cborserde` speak `Bytes`, `Str` and a recursive value
+tree. The embedded runtime defines no `novo_bytes_*` symbol, a tree is
+a heap allocation per node, and one host-only function anywhere in a
+compilation unit is an undefined symbol at link time on a device,
+whether or not the firmware calls it.
 
-Five places, and every one has the value tree as its answer.  None of
-them blocks the impl.
+## What is not included
 
-**One integer hook.**  `put_int(v: Int)` is all there is, so an unsigned
-value at or above 2^63 is unreachable, and anything beyond 64 bits needs
-a bignum tag this trait cannot write.  Both are built with `cborfmt`.
+- **Writing an indefinite length from the value tree.** A value tree
+  has nowhere to record that a length was not announced. `cborhead`
+  writes the form; see rule 2.
+- **Arithmetic on bignums.** `CborBigNum` carries the magnitude bytes
+  and the sign, which is what the tags carry.
+  [bigint-nv](https://novo-lang.org/packages/bigint-nv) is where
+  addition lives.
+- **A check that a tag 0 string is a valid RFC 3339 date.** This
+  package has no calendar, and a validator that half knew the grammar
+  would be worse than none.
+- **A clock.** `cborfmt.datetime_epoch_value` takes its seconds as a
+  parameter, which is also what makes a document reproducible.
+- **Byte strings through the serde bridge.** The standard library
+  declares `Serialize` for `Int`, `Float`, `Bool` and `Str` and for
+  nothing else, so major type 2 is unreachable from the trait walk. A
+  document that needs it is built with `CborBytes`.
+- **Tags through the serde bridge.** The trait has no hook for one, so
+  a profile that wraps its values in a tag, such as COSE or CWT, is
+  built with `cborfmt`.
+- **Integer map keys through the serde bridge.** `begin_struct` and
+  `field(name)` are the only way into a map, so a profile with integer
+  keys is built with `CborMap`.
+- **Half-precision and oversized integers through the serde bridge.**
+  The trait has one float hook, which writes a double, and one integer
+  hook, which takes a signed `Int`. `CborFloat16` and the bignum tags
+  are reached through `cborfmt`.
+- **An equality over CBOR values.** See rule 4.
+- **CDDL, COSE and CWT.** They are schema and security layers over this
+  format, and each is a package of its own.
 
-**One float hook.**  `put_float(v: Float)` writes a double, always.  Half
-precision — three bytes for a temperature against nine — is reached
-through `CborFloat16`.
+## Related packages
 
-**No bytes hook.**  The trait has `put_str` and nothing for `Bytes` —
-the standard library declares `Serialize` for `Int`, `Float`, `Bool` and
-`Str` and for nothing else — so major type 2 is unreachable from the
-walk.  A member that is really bytes travels as text of whatever the
-caller encoded it to, or the document is built with `CborBytes`.  **This
-is the one of the five that is a standard library gap rather than a
-novo-lang/CBOR impedance**: a `Serialize` impl for `Bytes` and a
-`put_bytes` hook would close it, and would close the same gap for
-msgpack-nv.
+- [msgpack-nv](https://novo-lang.org/packages/msgpack-nv) is
+  MessagePack, the other compact binary format with JSON's data model.
+  It carries no device half, so an embedded producer choosing between
+  the two chooses the one that compiles.
+- [postcard-nv](https://novo-lang.org/packages/postcard-nv) is a
+  nameless, untagged format for two ends that already share the type.
+  CBOR carries a key in front of every member, which is why the read
+  half of the bridge here can be written and postcard's cannot.
+- [serde-nv](https://novo-lang.org/packages/serde-nv) has a `cbor`
+  module of its own: the subset its trait walk needs, with definite
+  lengths and no tags. Both packages can be in one program, because the
+  module names and the public type names are disjoint. This package
+  does not depend on it, and depending on it would put a second CBOR
+  implementation in every consumer's assembly.
+- `std.serialize` in the standard library declares the `Serializer` and
+  `Deserializer` traits that `cborserde` implements. They are the
+  standard library's traits and not serde-nv's.
+- `std.json` in the standard library is the text format with the same
+  data model, for the places a document is read by a person.
 
-**No tag hook.**  A profile that wraps its values in a tag — COSE, CWT,
-a self-described file — cannot be written through the walk at all.
+## Tests
 
-**Struct keys are always text.**  `begin_struct` and `field(name)` are
-the only way into a map, so a document whose keys are integers — which
-every size-constrained CBOR profile uses — has to be built with
-`CborMap`.
+```bash
+novo test --isolate tests/cbor_tests.nv   # 56 tests: the Appendix A vectors, and more
+```
 
-And one thing that is a **cost** rather than a shortfall: the bridge
-writes `CborShortest` and cannot write `CborCanonical`, because the trait
-presents members in declaration order and gives the format no chance to
-sort them.  A caller who needs the deterministic encoding decodes and
-re-encodes with `cborfmt`.
+The expected bytes are RFC 8949 Appendix A's own table of diagnostic
+notation and encoding pairs, taken one per shape the interface has to
+get right, and RFC 8949 section 4.2.1 supplies the deterministic
+encoding rules. `ciborium` in Rust and `cbor2` in Python are the
+implementations to check a port against.
 
-## Indefinite lengths are read and collapsed
+The suite asserts that a one-byte head reaches 23 and 24 needs an
+argument, that major type 1's argument means `-1 - n`, that both
+integer majors read through one accessor, that an indefinite string is
+collapsed to the concatenation of its chunks, that a chunk whose major
+type differs is refused, that a break with nothing open is refused,
+that reserved additional information is refused, that non-UTF-8 text is
+refused, that the canonical mode sorts map keys by their encoded bytes,
+and that a document nested past the limit answers `CborDepthExceeded`.
 
-A value tree has nowhere to put "this array's length was not announced":
-the elements are the same elements either way.  So an indefinite array
-decodes to `CborArray`, an indefinite byte string to the concatenation
-of its chunks, and `encode` writes definite lengths throughout.
+The tests compile today and fail at run, each on the `not implemented`
+panic that is its body. That is the expected state of an interface
+release. They turn green one at a time as bodies land.
 
-What that costs is that **bytes** do not round-trip for an indefinite
-document, only **values** do — and a caller verifying a signature over
-the original bytes has to know.  `cbordec.saw_indefinite` is what tells
-it, and a producer that needs to write the indefinite form writes heads
-with `cborhead`.
+`tests/embedded_probe.nv` is the device claim; see "Running on a
+microcontroller".
 
-## The layer, and why
+## Implementation status
 
-`core`.  Everything here is arithmetic over bytes the caller already
-holds, and no function declares an effect — a wire format has nowhere to
-put one.  `datetime_epoch_value` takes its seconds as a parameter for
-the same reason a gzip header's mtime is a parameter: **a `core` package
-has no clock**.  And the RFC 3339 text of a tag 0 is handed over
-unparsed, because a `core` package has no calendar either — turning that
-string into a civil date is calendar-nv's work, and a validator that
-half-knew the grammar would be worse than one that does not claim to.
-
-## Not leb128-nv, not zigzag-nv
-
-postcard-nv depends on both, and a reader coming from there will look
-for them here.  CBOR's argument is **big-endian and fixed width** — zero,
-one, two, four or eight bytes chosen by the low five bits of the initial
-byte — and is not a variable-length quantity at all.  The negative fold
-is `-1 - n`, which looks like zigzag and is not: zigzag interleaves the
-signs into one unsigned range, and CBOR gives negatives a major type of
-their own.
-
-## The reference implementation
-
-RFC 8949 and `ciborium` (Rust, Apache-2.0) / `cbor2` (Python, MIT) as
-the implementations to check against.  Every vector in
-`tests/cbor_tests.nv` is from Appendix A — the specification's own table
-of diagnostic-notation-and-encoding pairs — or from § 4.2.1's
-deterministic encoding rules, so a reader can check the port against the
-specification rather than against this package.
-
-## Status
-
-| function | implemented |
+| Item | Implemented |
 | --- | --- |
 | `cborhead.major_*`, `.break_byte` | no |
 | `cborhead.head_len`, `.initial_byte`, `.negative_value`, `.negative_arg` | no |
@@ -231,10 +333,16 @@ specification rather than against this package.
 | `cborfmt.datetime_text_value`, `.datetime_epoch_value`, `.datetime_of` | no |
 | `cborfmt.bignum_value`, `.bignum_of`, `.decimal_value`, `.decimal_of` | no |
 | `cborfmt.encoded_len`, `.encode`, `.encode_into`, `.is_canonical` | no |
-| `cborfmt.decode`, `.decode_prefix`, `.CborError.message` | no |
+| `cborfmt.decode`, `.decode_prefix`, `CborError.message` | no |
 | `cbordec.decoder`, `.with_depth_limit`, `.pending`, `.stream_at` | no |
 | `cbordec.saw_indefinite`, `.feed`, `.finish` | no |
 | `cborserde.emitter`, `.emitter_bytes`, `.cursor`, `.cursor_at` | no |
 | `CborEmitter`'s `Serializer` methods | no |
 | `CborCursor`'s `Deserializer` methods | no |
 | `cborserde.to_bytes`, `.from_bytes` | no |
+
+## Licence
+
+Apache-2.0. See `LICENSE`.
+
+<!-- docs/writing-a-readme.md is the style guide for this page. -->

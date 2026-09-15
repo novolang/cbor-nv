@@ -1,6 +1,6 @@
 [package]
 name        = "cbor-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "RFC 8949 CBOR: all seven major types, definite and indefinite lengths, the tags a program actually meets, and core deterministic encoding as a named mode.  A value tree, an encoder into a caller's buffer, a feed-and-drain decoder, a serde bridge, and a head codec that allocates nothing and builds for a microcontroller.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
