@@ -315,7 +315,8 @@ The tests compile today and fail at run, each on the `not implemented`
 panic that is its body. That is the expected state of an interface
 release. They turn green one at a time as bodies land.
 
-`tests/embedded_probe.nv` is the device claim; see "Running on a
+`tests/embedded_probe.nv` is the program that shows `cborhead` builds
+for a microcontroller with no heap allocator. See "Running on a
 microcontroller".
 
 ## Implementation status
