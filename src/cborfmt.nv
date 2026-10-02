@@ -468,7 +468,7 @@ pub fn encode(v: CborValue, mode: CborMode) -> Bytes
 //
 // `CborBufferTooSmall` when the cursor has less room than `encoded_len`
 // says, and nothing is written in that case.
-pub fn encode_into(v: CborValue, mode: CborMode, mut dst: Cursor) -> Result<Int, CborError>
+pub fn encode_into(v: CborValue, mode: CborMode, var dst: Cursor) -> Result<Int, CborError>
     todo("cborfmt.encode_into")
 
 // Whether `src` is what `CborCanonical` would have produced for the

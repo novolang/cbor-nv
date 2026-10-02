@@ -182,7 +182,10 @@ fn test_the_appendix_a_maps()
         Err(e) => test.fail(e.message())
         Ok(v)  =>
             match cborfmt.get(v, "a")
-                Ok(got) => test.assert_eq(cborfmt.as_int(got) ?? 0, 1)
+                Ok(got) =>
+                    match cborfmt.as_int(got)
+                        Ok(n)   => test.assert_eq(n, 1)
+                        Err(e3) => test.fail(e3.message())
                 Err(e2) => test.fail(e2.message())
 
 @test
