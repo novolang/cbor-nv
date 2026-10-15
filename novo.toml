@@ -1,15 +1,10 @@
 [package]
 name        = "cbor-nv"
-version     = "0.0.2"
-description = "RFC 8949 CBOR: all seven major types, definite and indefinite lengths, the tags a program actually meets, and core deterministic encoding as a named mode.  A value tree, an encoder into a caller's buffer, a feed-and-drain decoder, a serde bridge, and a head codec that allocates nothing and builds for a microcontroller.  Interface only — every body is a todo()."
+version     = "0.1.0"
+description = "RFC 8949 CBOR: all seven major types, definite and indefinite lengths, the tags a program actually meets, and core deterministic encoding as a named mode.  A value tree, an encoder into a caller's buffer, a feed-and-drain decoder, a serde bridge, and a head codec that allocates nothing and builds for a microcontroller."
 license     = "Apache-2.0"
 
-# An INTERFACE release: every `pub fn` body is a `todo()`, so the
-# signatures and the effect rows are published and nothing is
-# implemented.  `novo pkg publish` recognises the shape and requires
-# both the draft stability and the 0.0.x version; the first
-# implementation is the 0.1.0 published over it.
-stability   = "draft"
+stability   = "experimental"
 
 # `core`: arithmetic over bytes the caller already holds.  No function
 # declares an effect — a wire format has nowhere to put one, and the
@@ -27,7 +22,7 @@ category    = "data"
 tags        = ["cbor", "rfc8949", "serde", "wire-format", "streaming", "embedded", "sans-io"]
 repository  = "https://github.com/novolang/cbor-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.8.9"
+novo        = ">= 0.20.2"
 
 [docs.pages]
 "README.md" = "The binary JSON an embedded producer reaches for"

@@ -1,0 +1,80 @@
+// tests/hostile_tests.nv — heads that overflow, nesting without end, and counts the bytes cannot back.
+
+use std.test
+use std.str
+use std.bytes
+use cborhead
+use cborfmt
+use cborserde
+
+fn hex(s: Str) -> Bytes
+    bytes.from_hex(s) ?? bytes.zeros(0)
+
+@test
+fn test_a_nine_byte_head_scans_without_overflow()
+    var s = cborhead.push(cborhead.scan(), 0x1B as u8)
+    for _ in 0..8
+        s = cborhead.push(s, 0xFF as u8)
+    test.assert_eq(s.done, true)
+    test.assert_eq(s.arg, -1)
+    var t = cborhead.push(cborhead.scan(), 0x1B as u8)
+    for k in 0..8
+        t = cborhead.push(t, (if k == 7 then 5 else 0) as u8)
+    test.assert_eq(t.arg, 5)
+
+@test
+fn test_a_member_lookup_past_deeply_nested_arrays_is_refused() [io]
+    // A map of one entry whose value nests a hundred thousand arrays.
+    let src = hex("a1616181" + str.repeat("81", 100000) + "00")
+    let r = cborserde.cursor(src)
+    match r.field("b")
+        Ok(_)  => test.fail("a member that is not there was found")
+        Err(_) => test.assert_eq(1, 1)
+
+@test
+fn test_a_member_lookup_past_a_long_tag_chain_is_refused() [io]
+    let src = hex("a1616181" + str.repeat("c1", 100000) + "00")
+    let r = cborserde.cursor(src)
+    match r.field("b")
+        Ok(_)  => test.fail("a member that is not there was found")
+        Err(_) => test.assert_eq(1, 1)
+
+@test
+fn test_an_element_far_past_the_data_of_a_huge_array_ends_at_the_data() [io]
+    // The declared count is 2^63-2 and one element follows.
+    let r = cborserde.cursor(hex("9b7ffffffffffffffe01"))
+    match r.seq_at(4611686018427387904)
+        Ok(m)  => test.assert_eq(m.is_null(), false)
+        Err(_) => test.assert_eq(1, 1)
+
+@test
+fn test_an_honest_array_and_member_still_read() [io]
+    let r = cborserde.cursor(hex("a2616101616282010203"))
+    match r.field("b")
+        Err(e) => test.fail(e.reason)
+        Ok(m)  =>
+            match m.seq_len()
+                Err(e) => test.fail(e.reason)
+                Ok(n)  => test.assert_eq(n, 2)
+
+@test
+fn test_an_indefinite_byte_string_of_many_chunks_decodes() [io]
+    let n = 4000000
+    let src = hex("5f" + str.repeat("4100", n) + "ff")
+    match cborfmt.decode(src)
+        Err(e) => test.fail(e.message())
+        Ok(v)  =>
+            match cborfmt.as_bytes(v)
+                Err(e) => test.fail(e.message())
+                Ok(b)  => test.assert_eq(bytes.len(b), n)
+
+@test
+fn test_an_indefinite_text_string_of_many_chunks_decodes() [io]
+    let n = 4000000
+    let src = hex("7f" + str.repeat("6161", n) + "ff")
+    match cborfmt.decode(src)
+        Err(e) => test.fail(e.message())
+        Ok(v)  =>
+            match cborfmt.as_text(v)
+                Err(e) => test.fail(e.message())
+                Ok(t)  => test.assert_eq(str.len(t), n)

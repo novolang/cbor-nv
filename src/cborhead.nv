@@ -2,9 +2,6 @@
 // allocates nothing, holds no buffer, and builds for a
 // microcontroller.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // WHY THIS MODULE IS THE DEVICE HALF.  `cborfmt` speaks `Bytes`, `Str`
 // and a recursive value tree, and none of those links at the embedded
 // tier: the embedded runtime defines no `novo_bytes_*` symbol, and a
@@ -36,42 +33,42 @@
 //     println("${cborhead.major_unsigned()}")   // 0
 // ```
 pub fn major_unsigned() -> Int
-    todo("cborhead.major_unsigned")
+    0
 
 // Major type 1: a negative integer.  The argument `n` means `-1 - n`,
 // so the encoding has no redundant negative zero and a one-byte head
 // reaches -24.
 pub fn major_negative() -> Int
-    todo("cborhead.major_negative")
+    1
 
 // Major type 2: a byte string.  The argument is its length.
 pub fn major_bytes() -> Int
-    todo("cborhead.major_bytes")
+    2
 
 // Major type 3: a text string, UTF-8 by specification.  The argument is
 // its length IN BYTES and never in characters.
 pub fn major_text() -> Int
-    todo("cborhead.major_text")
+    3
 
 // Major type 4: an array.  The argument is its element count.
 pub fn major_array() -> Int
-    todo("cborhead.major_array")
+    4
 
 // Major type 5: a map.  The argument is its PAIR count, so a map head
 // of 2 is followed by four values.
 pub fn major_map() -> Int
-    todo("cborhead.major_map")
+    5
 
 // Major type 6: a tag.  The argument is the tag number, and exactly one
 // data item follows.
 pub fn major_tag() -> Int
-    todo("cborhead.major_tag")
+    6
 
 // Major type 7: the simple values and the floats — `false`, `true`,
 // `null`, `undefined`, the half, single and double floats, and the
 // break byte that ends an indefinite-length item.
 pub fn major_simple() -> Int
-    todo("cborhead.major_simple")
+    7
 
 // `0xff`, the break: what ends an indefinite-length string, array or
 // map.
@@ -79,7 +76,22 @@ pub fn major_simple() -> Int
 // It is major type 7 with additional information 31, which is why no
 // other value may use that combination.
 pub fn break_byte() -> Int
-    todo("cborhead.break_byte")
+    0xFF
+
+// The additional information a head writes for `arg`: the argument
+// itself while it fits the five bits, and otherwise 24, 25, 26 or 27
+// for the one, two, four and eight bytes that follow.
+//
+// A negative argument has no encoding; 27 is answered so that the
+// function is total, and `emit_head` refuses such an argument anyway.
+fn head_info(arg: Int) -> Int
+    match arg
+        _ if arg < 0       => 27
+        0..=23             => arg
+        24..=255           => 24
+        256..=65535        => 25
+        65536..=4294967295 => 26
+        _                  => 27
 
 // How many bytes the shortest head for `arg` occupies: 1, 2, 3, 5 or 9.
 //
@@ -93,7 +105,13 @@ pub fn break_byte() -> Int
 //     println("${cborhead.head_len(23)} ${cborhead.head_len(24)}")   // 1 2
 // ```
 pub fn head_len(arg: Int) -> Int
-    todo("cborhead.head_len")
+    match arg
+        _ if arg < 0       => 9
+        0..=23             => 1
+        24..=255           => 2
+        256..=65535        => 3
+        65536..=4294967295 => 5
+        _                  => 9
 
 // The initial byte of the shortest head for `major` and `arg`.
 //
@@ -101,17 +119,17 @@ pub fn head_len(arg: Int) -> Int
 // information: the argument itself for `0 ..= 23`, and 24, 25, 26 or 27
 // for the four argument widths.
 pub fn initial_byte(major: Int, arg: Int) -> Int
-    todo("cborhead.initial_byte")
+    major * 32 + head_info(arg)
 
 // The value a major-type-1 argument stands for: `-1 - arg`.
 pub fn negative_value(arg: Int) -> Int
-    todo("cborhead.negative_value")
+    -1 - arg
 
 // The major-type-1 argument that stands for `v`: `-1 - v`.
 //
 // `v` must be negative; a non-negative value belongs in major type 0.
 pub fn negative_arg(v: Int) -> Int
-    todo("cborhead.negative_arg")
+    -1 - v
 
 // A head being read, one byte at a time.
 //
@@ -144,7 +162,46 @@ struct CborHeadScan
 //     println("${cborhead.scan().seen}")   // 0
 // ```
 pub fn scan() -> CborHeadScan
-    todo("cborhead.scan")
+    CborHeadScan { major: 0, arg: 0, seen: 0, want: 0,
+                   indefinite: false, done: false, bad: false }
+
+// The scan an initial byte produces.  The five bits of additional
+// information decide everything: the argument itself, one of the four
+// widths, the break that makes the head indefinite, or one of the three
+// values RFC 8949 § 3 reserves.
+fn scan_first(b: u8) -> CborHeadScan
+    let major = b as Int / 32
+    let info = b as Int % 32
+    match info
+        _ if info <= 23 =>
+            CborHeadScan { major: major, arg: info, seen: 1, want: 1,
+                           indefinite: false, done: true, bad: false }
+        24              =>
+            CborHeadScan { major: major, arg: 0, seen: 1, want: 2,
+                           indefinite: false, done: false, bad: false }
+        25              =>
+            CborHeadScan { major: major, arg: 0, seen: 1, want: 3,
+                           indefinite: false, done: false, bad: false }
+        26              =>
+            CborHeadScan { major: major, arg: 0, seen: 1, want: 5,
+                           indefinite: false, done: false, bad: false }
+        27              =>
+            CborHeadScan { major: major, arg: 0, seen: 1, want: 9,
+                           indefinite: false, done: false, bad: false }
+        31              =>
+            CborHeadScan { major: major, arg: 0, seen: 1, want: 1,
+                           indefinite: true, done: true, bad: false }
+        _               =>
+            CborHeadScan { major: major, arg: 0, seen: 1, want: 1,
+                           indefinite: false, done: true, bad: true }
+
+// One more argument byte: the running argument is shifted up a byte and
+// the new one goes in at the bottom.
+fn scan_more(s: CborHeadScan, b: u8) -> CborHeadScan
+    let seen = s.seen + 1
+    CborHeadScan { major: s.major, arg: (s.arg << 8) | b as Int, seen: seen,
+                   want: s.want, indefinite: s.indefinite,
+                   done: seen >= s.want, bad: s.bad }
 
 // Feed one byte and answer the scan after it.
 //
@@ -162,7 +219,12 @@ pub fn scan() -> CborHeadScan
 //     println("${s.done} ${s.arg}")   // true 1
 // ```
 pub fn push(s: CborHeadScan, b: u8) -> CborHeadScan
-    todo("cborhead.push")
+    if s.done
+        s
+    else if s.seen == 0
+        scan_first(b)
+    else
+        scan_more(s, b)
 
 // How many more bytes the scan needs: `want - seen`, and 1 before the
 // initial byte has arrived.
@@ -170,7 +232,10 @@ pub fn push(s: CborHeadScan, b: u8) -> CborHeadScan
 // What a device reading from a UART asks so that it can wait for
 // exactly that many.
 pub fn scan_need(s: CborHeadScan) -> Int
-    todo("cborhead.scan_need")
+    if s.seen == 0
+        1
+    else
+        s.want - s.seen
 
 // What one head write produced: the bytes, and whether the head was
 // writable.
@@ -185,6 +250,33 @@ struct CborEmit
     len: Int
     ok: Bool
 
+// `256 ^ k`, the divisor that puts the argument's byte `k` from the
+// bottom into the units place.
+fn pow256(k: Int) -> Int
+    var p = 1
+    for _ in 0..k
+        p = p * 256
+    p
+
+// Byte `i` of a head of `len` bytes for `major` and `arg`, counting
+// from the front: the initial byte first, then the argument
+// big-endian.  Past the end of the head the answer is 0, so `emit_head`
+// can build its nine-byte array without knowing `len` at each slot.
+fn head_byte(major: Int, arg: Int, len: Int, i: Int) -> Int
+    match i
+        0             => initial_byte(major, arg)
+        _ if i >= len => 0
+        _             => arg / pow256(len - 1 - i) % 256
+
+// What a refused write answers: nothing written, and `ok` false.  The
+// array is built here as a literal because `[u8; 9]` is an inline array
+// only as a field of a `@value` struct, so no function can answer one
+// on its own.
+fn no_head() -> CborEmit
+    CborEmit { out: [0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8,
+                     0 as u8, 0 as u8, 0 as u8, 0 as u8],
+               len: 0, ok: false }
+
 // The shortest head for `major` and `arg`.
 //
 // ```novo
@@ -195,7 +287,20 @@ struct CborEmit
 //     println("${e.len}")   // 1 — 0x82, an array of two
 // ```
 pub fn emit_head(major: Int, arg: Int) -> CborEmit
-    todo("cborhead.emit_head")
+    if major < 0 or major > 7 or arg < 0
+        no_head()
+    else
+        let len = head_len(arg)
+        CborEmit { out: [head_byte(major, arg, len, 0) as u8,
+                         head_byte(major, arg, len, 1) as u8,
+                         head_byte(major, arg, len, 2) as u8,
+                         head_byte(major, arg, len, 3) as u8,
+                         head_byte(major, arg, len, 4) as u8,
+                         head_byte(major, arg, len, 5) as u8,
+                         head_byte(major, arg, len, 6) as u8,
+                         head_byte(major, arg, len, 7) as u8,
+                         head_byte(major, arg, len, 8) as u8],
+                   len: len, ok: true }
 
 // The indefinite-length head for `major`: the initial byte with
 // additional information 31, and nothing after it.
@@ -206,9 +311,17 @@ pub fn emit_head(major: Int, arg: Int) -> CborEmit
 // streaming a log is always in, and the reason CBOR has the form at
 // all.
 pub fn emit_indefinite(major: Int) -> CborEmit
-    todo("cborhead.emit_indefinite")
+    if major < 2 or major > 5
+        no_head()
+    else
+        let head = major * 32 + 31
+        CborEmit { out: [head as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8,
+                         0 as u8, 0 as u8, 0 as u8, 0 as u8],
+                   len: 1, ok: true }
 
 // The break byte, as an emit, so a producer writing heads writes its
 // terminator the same way it writes everything else.
 pub fn emit_break() -> CborEmit
-    todo("cborhead.emit_break")
+    CborEmit { out: [0xFF as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8,
+                     0 as u8, 0 as u8, 0 as u8, 0 as u8],
+               len: 1, ok: true }

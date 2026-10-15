@@ -8,12 +8,6 @@ implements the format for novo-lang: a value tree, a streaming decoder,
 a bridge to the standard library's serialization traits, and a head
 codec that builds for a microcontroller. It depends on nothing.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is
-declared with its full signature, but every body is a `todo()` that
-panics when called. The package is published so its design can be
-reviewed and depended on before it is implemented. Version 0.1.0 will
-be the first working release.
-
 ## What it is
 
 A CBOR document is one **data item**. Every data item begins with an
@@ -106,10 +100,7 @@ fn main() [io]
                 Ok(id)  => println(cborfmt.type_name(id))
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a `not implemented:
-cborfmt.<fn>` panic. The tests are the specification the
-implementation will have to satisfy.
+Build and test with `novo pkg build` and `novo test`.
 
 ## What the package contains
 
@@ -311,36 +302,15 @@ that reserved additional information is refused, that non-UTF-8 text is
 refused, that the canonical mode sorts map keys by their encoded bytes,
 and that a document nested past the limit answers `CborDepthExceeded`.
 
-The tests compile today and fail at run, each on the `not implemented`
-panic that is its body. That is the expected state of an interface
-release. They turn green one at a time as bodies land.
+`tests/cbor_nv_edge_tests.nv` is the supplementary suite: the shapes
+the oracle does not reach — a value split across chunks at every
+boundary, non-deterministic input a decoder must still accept, the head
+walk the cursor uses to step over a value, and the serde bridge's enum,
+optional and sequence paths.
 
 `tests/embedded_probe.nv` is the program that shows `cborhead` builds
 for a microcontroller with no heap allocator. See "Running on a
 microcontroller".
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `cborhead.major_*`, `.break_byte` | no |
-| `cborhead.head_len`, `.initial_byte`, `.negative_value`, `.negative_arg` | no |
-| `cborhead.scan`, `.push`, `.scan_need` | no |
-| `cborhead.emit_head`, `.emit_indefinite`, `.emit_break` | no |
-| `cborfmt.type_name`, `.initial_byte`, `.default_depth_limit` | no |
-| `cborfmt.as_int`, `.as_bool`, `.as_float`, `.as_text`, `.as_bytes` | no |
-| `cborfmt.as_array`, `.as_map`, `.get`, `.untagged` | no |
-| `cborfmt.tag_*` | no |
-| `cborfmt.datetime_text_value`, `.datetime_epoch_value`, `.datetime_of` | no |
-| `cborfmt.bignum_value`, `.bignum_of`, `.decimal_value`, `.decimal_of` | no |
-| `cborfmt.encoded_len`, `.encode`, `.encode_into`, `.is_canonical` | no |
-| `cborfmt.decode`, `.decode_prefix`, `CborError.message` | no |
-| `cbordec.decoder`, `.with_depth_limit`, `.pending`, `.stream_at` | no |
-| `cbordec.saw_indefinite`, `.feed`, `.finish` | no |
-| `cborserde.emitter`, `.emitter_bytes`, `.cursor`, `.cursor_at` | no |
-| `CborEmitter`'s `Serializer` methods | no |
-| `CborCursor`'s `Deserializer` methods | no |
-| `cborserde.to_bytes`, `.from_bytes` | no |
 
 ## Licence
 

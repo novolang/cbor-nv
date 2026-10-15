@@ -1,8 +1,5 @@
 // cbordec — the CBOR decoder as a state machine a host pumps.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // WHY THIS IS A SEPARATE MODULE FROM `cborfmt`.  `cborfmt.decode` takes
 // a whole document and answers a whole value; this takes a chunk and
 // answers whatever is finished.  They are the same arithmetic with
@@ -28,6 +25,9 @@
 // producer for one document per record instead, which is what RFC 8742
 // sequences are for.  `saw_indefinite` is how a caller finds out which
 // kind of producer it has.
+
+use cborfmt
+use cborhead
 
 // A decoder between two chunks.
 //
@@ -55,16 +55,20 @@ pub struct CborDecoder
 // fn main() [io]
 //     println("${cbordec.pending(cbordec.decoder())}")   // 0
 // ```
-pub fn decoder() -> CborDecoder
-    todo("cbordec.decoder")
+pub @tier(app)
+fn decoder() -> CborDecoder
+    CborDecoder { held: bytes.zeros(0), at: 0,
+                  depth_limit: cborfmt.default_depth_limit(), indefinite_seen: false }
 
 // `d` with a different nesting limit.
 //
 // A caller who genuinely has data ninety levels deep raises it; a
 // caller decoding messages from the network lowers it.  A limit below 1
 // is taken as 1, because a document is at least one value deep.
-pub fn with_depth_limit(d: CborDecoder, limit: Int) -> CborDecoder
-    todo("cbordec.with_depth_limit")
+pub @tier(app)
+fn with_depth_limit(d: CborDecoder, limit: Int) -> CborDecoder
+    CborDecoder { held: d.held, at: d.at, depth_limit: (if limit < 1 then 1 else limit),
+                  indefinite_seen: d.indefinite_seen }
 
 // How many bytes the decoder is holding that did not finish a value.
 //
@@ -72,14 +76,14 @@ pub fn with_depth_limit(d: CborDecoder, limit: Int) -> CborDecoder
 // stops changing while the connection is open is a peer that stopped
 // mid-document.
 pub fn pending(d: CborDecoder) -> Int
-    todo("cbordec.pending")
+    bytes.len(d.held)
 
 // How many bytes of the stream the decoder has consumed, counted from
 // the first chunk.
 //
 // The offset every `CborError` is reported against.
 pub fn stream_at(d: CborDecoder) -> Int
-    todo("cbordec.stream_at")
+    d.at
 
 // Whether any value drained so far was written with an
 // indefinite-length head.
@@ -90,7 +94,7 @@ pub fn stream_at(d: CborDecoder) -> Int
 // can ignore this; a caller verifying a signature over the original
 // bytes cannot, and this is what tells it so.
 pub fn saw_indefinite(d: CborDecoder) -> Bool
-    todo("cbordec.saw_indefinite")
+    d.indefinite_seen
 
 // What one `feed` produced: the decoder after it, and the values that
 // finished.
@@ -128,8 +132,34 @@ pub struct CborFeed
 //         Ok(first) =>
 //             println("${list.len(first.values)}")   // 0 — nothing finished yet
 // ```
-pub fn feed(d: CborDecoder, chunk: Bytes) -> Result<CborFeed, CborError>
-    todo("cbordec.feed")
+pub @tier(app)
+fn feed(d: CborDecoder, chunk: Bytes) -> Result<CborFeed, CborError>
+    let buffer = bytes.concat([d.held, chunk])
+    let n = bytes.len(buffer)
+    var values: [cborfmt.CborValue] = []
+    var start = 0
+    for _ in 0..n
+        if start >= n
+            break
+        let rest = bytes.slice(buffer, start, n)
+        match cborfmt.decode_prefix_limited(rest, d.depth_limit)
+            Ok(p)  =>
+                list.push(values, p.value)
+                start = start + p.consumed
+            Err(e) =>
+                if is_truncation(e)
+                    break
+                return Err(shifted(e, d.at + start))
+    let held = bytes.slice(buffer, start, n)
+    var seen = d.indefinite_seen
+    if start > 0
+        let walked = used_indefinite(buffer, start, d.depth_limit)!
+        if walked
+            seen = true
+    Ok(CborFeed { decoder: CborDecoder { held: held, at: d.at + start,
+                                         depth_limit: d.depth_limit,
+                                         indefinite_seen: seen },
+                  values: values })
 
 // Declare the stream over.
 //
@@ -138,5 +168,170 @@ pub fn feed(d: CborDecoder, chunk: Bytes) -> Result<CborFeed, CborError>
 // indefinite-length item that the producer never closed is exactly this
 // case, and it is the one a caller most wants told about: the bytes
 // look fine and the value never arrives.
-pub fn finish(d: CborDecoder) -> Result<CborDecoder, CborError>
-    todo("cbordec.finish")
+pub @tier(app)
+fn finish(d: CborDecoder) -> Result<CborDecoder, CborError>
+    if bytes.len(d.held) > 0
+        if let Err(e) = cborfmt.decode_prefix_limited(d.held, d.depth_limit)
+            return Err(shifted(e, d.at))
+    Ok(d)
+
+// Whether a refusal only means the value has not all arrived.
+fn is_truncation(e: CborError) -> Bool
+    match e
+        CborTruncated(_, _) => true
+        _                   => false
+
+// A refusal with its offset moved from the held bytes to the stream.
+@tier(app)
+fn shifted(e: CborError, by: Int) -> CborError
+    match e
+        CborTruncated(at, need)      => CborTruncated(at + by, need)
+        CborReservedInfo(at, info)   => CborReservedInfo(at + by, info)
+        CborBadIndefinite(at, major) => CborBadIndefinite(at + by, major)
+        CborUnexpectedBreak(at)      => CborUnexpectedBreak(at + by)
+        CborBadChunk(at, major)      => CborBadChunk(at + by, major)
+        CborBadUtf8(at)              => CborBadUtf8(at + by)
+        CborDepthExceeded(at, depth) => CborDepthExceeded(at + by, depth)
+        // cov: skip — reading a value answers no other refusal
+        CborTrailingBytes(at, len)   => CborTrailingBytes(at + by, len)
+        // cov: skip — reading a value answers no other refusal
+        CborWrongType(at, want, saw) => CborWrongType(at + by, want, saw)
+        // cov: skip — reading a value answers no other refusal
+        CborBadTagPayload(at, tag)   => CborBadTagPayload(at + by, tag)
+        // cov: skip — reading a value answers no other refusal
+        other                        => other
+
+// One item walked without building it: whether an indefinite-length
+// head appeared anywhere inside, and the offset just past the item.
+struct CborWalk
+    indefinite: Bool
+    next: Int
+
+// Walk the item at `at`, skipping every body by the length or the count
+// its head announced.
+//
+// This is the only place the indefinite form is still visible: the
+// value tree collapses it, so a caller checking a signature over the
+// original bytes has to ask the bytes.  Nothing is built, so a walk
+// allocates nothing.
+@tier(app)
+fn walk_item(src: Bytes, at: Int, depth: Int, limit: Int) -> Result<CborWalk, CborError>
+    let n = bytes.len(src)
+    if at >= n
+        // cov: skip — the walk reads only the bytes the reader accepted
+        return Err(CborTruncated(at, at + 1 - n))
+    let b = bytes.byte_at(src, at) ?? 0
+    if b == 0xFF
+        // cov: skip — the walk reads only the bytes the reader accepted
+        return Err(CborUnexpectedBreak(at))
+    if depth > limit
+        // cov: skip — the walk reads only the bytes the reader accepted
+        return Err(CborDepthExceeded(at, limit))
+    let major = b / 32
+    let info = b % 32
+    if info >= 28 and info <= 30
+        // cov: skip — the walk reads only the bytes the reader accepted
+        return Err(CborReservedInfo(at, info))
+    if info == 31
+        return walk_indefinite(src, at, major, depth, limit)
+    let width = walk_width(info)
+    let body = at + 1
+    if body + width > n
+        // cov: skip — the walk reads only the bytes the reader accepted
+        return Err(CborTruncated(at, body + width - n))
+    var arg = if width == 0
+        info
+    else
+        0
+    for i in 0..width
+        arg = (arg << 8) | (bytes.byte_at(src, body + i) ?? 0)
+    let next = body + width
+    if major == cborhead.major_bytes() or major == cborhead.major_text()
+        if arg < 0 or arg > n - next
+            // cov: skip — the walk reads only the bytes the reader accepted
+            return Err(CborTruncated(at, shortfall_of(arg, n - next)))
+        return Ok(CborWalk { indefinite: false, next: next + arg })
+    if major == cborhead.major_array() or major == cborhead.major_map()
+        if arg < 0 or arg > n - next
+            // cov: skip — the walk reads only the bytes the reader accepted
+            return Err(CborTruncated(at, shortfall_of(arg, n - next)))
+        let count = if major == cborhead.major_map()
+            arg * 2
+        else
+            arg
+        return walk_children(src, next, count, depth, limit)
+    if major == cborhead.major_tag()
+        return walk_item(src, next, depth + 1, limit)
+    Ok(CborWalk { indefinite: false, next: next })
+
+// How many argument bytes the additional information announces: none
+// for a value that fits the five bits, then one, two, four or eight.
+//
+// A walk only needs the count, where the reader needs the count and the
+// argument, which is why the two arithmetic helpers are apart.
+fn walk_width(info: Int) -> Int
+    match info
+        _ if info <= 23 => 0
+        24              => 1
+        25              => 2
+        26              => 4
+        _               => 8
+
+// How many bytes are missing when `need` were announced and `have` are
+// there, saturating for a length that does not fit a signed `Int`.
+// cov: skip — every caller asks only after a length was found short
+fn shortfall_of(need: Int, have: Int) -> Int
+    if need < 0
+        return 9223372036854775807
+    if need > have
+        return need - have
+    0
+
+// The `count` elements of a definite-length array or map at `body`.
+@tier(app)
+fn walk_children(src: Bytes, body: Int, count: Int, depth: Int,
+                 limit: Int) -> Result<CborWalk, CborError>
+    var indefinite = false
+    var next = body
+    for _ in 0..count
+        let w = walk_item(src, next, depth + 1, limit)!
+        if w.indefinite
+            indefinite = true
+        next = w.next
+    Ok(CborWalk { indefinite: indefinite, next: next })
+
+// An indefinite-length item: its chunks or its elements until the break
+// byte, and `true`, because the head itself is the indefinite one.
+@tier(app)
+fn walk_indefinite(src: Bytes, at: Int, major: Int, depth: Int,
+                   limit: Int) -> Result<CborWalk, CborError>
+    if major < cborhead.major_bytes() or major > cborhead.major_map()
+        // cov: skip — the walk reads only the bytes the reader accepted
+        return Err(CborBadIndefinite(at, major))
+    let n = bytes.len(src)
+    var next = at + 1
+    while next < n
+        let b = bytes.byte_at(src, next) ?? 0
+        if b == 0xFF
+            return Ok(CborWalk { indefinite: true, next: next + 1 })
+        if major == cborhead.major_bytes() or major == cborhead.major_text()
+            if b / 32 != major or b % 32 == 31
+                // cov: skip — the walk reads only the bytes the reader accepted
+                return Err(CborBadChunk(next, b / 32))
+        let w = walk_item(src, next, depth + 1, limit)!
+        next = w.next
+    // cov: skip — the walk reads only the bytes the reader accepted
+    Err(CborTruncated(next, next + 1 - n))
+
+// Whether whole items in the first `count` bytes of `buffer` — items
+// the reader has already accepted — use an indefinite length anywhere.
+@tier(app)
+fn used_indefinite(buffer: Bytes, count: Int, limit: Int) -> Result<Bool, CborError>
+    var at = 0
+    var seen = false
+    while at < count
+        let w = walk_item(buffer, at, 1, limit)!
+        if w.indefinite
+            seen = true
+        at = w.next
+    Ok(seen)

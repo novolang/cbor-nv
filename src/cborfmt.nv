@@ -1,9 +1,6 @@
 // cborfmt — the CBOR value tree, the tags, and the encoder that writes
 // them.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // WHY THE MODULE IS NOT CALLED `cbor`.  serde-nv already ships a module
 // of that name — the subset its trait walk needs — and two dependencies
 // of one program may not both ship a module with the same name.  The
@@ -38,6 +35,8 @@
 // only VALUES do — and `cbordec.saw_indefinite` is how a caller who
 // cares finds out.  A producer that needs to write the indefinite form
 // writes heads with `cborhead`.
+
+use cborhead
 
 // A CBOR value.
 //
@@ -195,13 +194,33 @@ pub enum CborError
     // document.
     CborBufferTooSmall(need: Int, have: Int)
 
+// The report for a value of the wrong kind.  An accessor has no offset
+// to name, so a negative one leaves the offset out.
+@tier(app)
+fn wrong_report(at: Int, want: Str, saw: Str) -> Str
+    if at < 0
+        return "cbor: wanted ${want} and found ${saw}"
+    "cbor: wanted ${want} and found ${saw} at offset ${at}"
+
 // The standard `Error` implementation, so a bad document can be
 // reported by anything that reports errors.
 impl Error for CborError
     // Answer the one-line report: what was wrong, and at what byte
     // offset.
+    @tier(app)
     fn message(self) -> Str
-        todo("cborfmt.CborError.message")
+        match self
+            CborTruncated(at, need)        => "cbor: the value at offset ${at} needs ${need} more bytes"
+            CborReservedInfo(at, info)     => "cbor: additional information ${info} at offset ${at} is reserved"
+            CborBadIndefinite(at, major)   => "cbor: major type ${major} at offset ${at} has no indefinite form"
+            CborUnexpectedBreak(at)        => "cbor: the break byte at offset ${at} closes nothing"
+            CborBadChunk(at, major)        => "cbor: a chunk of major type ${major} at offset ${at} does not match its string"
+            CborBadUtf8(at)                => "cbor: the text at offset ${at} is not UTF-8"
+            CborDepthExceeded(at, depth)   => "cbor: the value at offset ${at} nests past the limit of ${depth}"
+            CborTrailingBytes(at, len)     => "cbor: ${len} bytes follow the value, from offset ${at}"
+            CborWrongType(at, want, saw)   => wrong_report(at, want, saw)
+            CborBadTagPayload(at, tag)     => "cbor: the payload of tag ${tag} at offset ${at} is the wrong shape"
+            CborBufferTooSmall(need, have) => "cbor: ${need} bytes are needed and the destination holds ${have}"
 
 // ── Reading a value that has already been decoded ───────────────────
 
@@ -219,7 +238,22 @@ impl Error for CborError
 //     println(cborfmt.type_name(CborNull))   // null
 // ```
 pub fn type_name(v: CborValue) -> Str
-    todo("cborfmt.type_name")
+    match v
+        CborUnsigned(_)   => "unsigned"
+        CborNegative(_)   => "negative"
+        CborWideInt(_, _) => "wide"
+        CborBytes(_)      => "bytes"
+        CborText(_)       => "text"
+        CborArray(_)      => "array"
+        CborMap(_)        => "map"
+        CborTagged(_, _)  => "tag"
+        CborBool(_)       => "bool"
+        CborNull          => "null"
+        CborUndefined     => "undefined"
+        CborSimple(_)     => "simple"
+        CborFloat16(_)    => "float16"
+        CborFloat32(_)    => "float32"
+        CborFloat64(_)    => "float64"
 
 // The integer in `v`, or `CborWrongType`.
 //
@@ -227,40 +261,64 @@ pub fn type_name(v: CborValue) -> Str
 // is the wire's and not the caller's.  `CborWideInt` does not: its
 // value does not fit a signed `Int`, and answering the bit pattern
 // would hand a caller a negative number for a positive document.
-pub fn as_int(v: CborValue) -> Result<Int, CborError>
-    todo("cborfmt.as_int")
+pub @tier(app)
+fn as_int(v: CborValue) -> Result<Int, CborError>
+    match v
+        CborUnsigned(n) => Ok(n)
+        CborNegative(n) => Ok(n)
+        _               => Err(CborWrongType(-1, "integer", type_name(v)))
 
 // The boolean in `v`, or `CborWrongType`.
-pub fn as_bool(v: CborValue) -> Result<Bool, CborError>
-    todo("cborfmt.as_bool")
+pub @tier(app)
+fn as_bool(v: CborValue) -> Result<Bool, CborError>
+    match v
+        CborBool(b) => Ok(b)
+        _           => Err(CborWrongType(-1, "bool", type_name(v)))
 
 // The float in `v`, or `CborWrongType`.
 //
 // All three widths answer here: a caller that cares which one it was
 // matches on the value instead.
-pub fn as_float(v: CborValue) -> Result<Float, CborError>
-    todo("cborfmt.as_float")
+pub @tier(app)
+fn as_float(v: CborValue) -> Result<Float, CborError>
+    match v
+        CborFloat16(f) => Ok(f)
+        CborFloat32(f) => Ok(f)
+        CborFloat64(f) => Ok(f)
+        _              => Err(CborWrongType(-1, "float", type_name(v)))
 
 // The text in `v`, or `CborWrongType`.
 //
 // A `CborBytes` is not text even when its bytes happen to be UTF-8,
 // because the document said otherwise and telling the two apart is what
 // major type 2 exists for.
-pub fn as_text(v: CborValue) -> Result<Str, CborError>
-    todo("cborfmt.as_text")
+pub @tier(app)
+fn as_text(v: CborValue) -> Result<Str, CborError>
+    match v
+        CborText(t) => Ok(t)
+        _           => Err(CborWrongType(-1, "text", type_name(v)))
 
 // The bytes in `v`, or `CborWrongType`.
-pub fn as_bytes(v: CborValue) -> Result<Bytes, CborError>
-    todo("cborfmt.as_bytes")
+pub @tier(app)
+fn as_bytes(v: CborValue) -> Result<Bytes, CborError>
+    match v
+        CborBytes(b) => Ok(bytes.clone(b))
+        _            => Err(CborWrongType(-1, "bytes", type_name(v)))
 
 // The elements of `v`, or `CborWrongType`.
-pub fn as_array(v: CborValue) -> Result<[CborValue], CborError>
-    todo("cborfmt.as_array")
+pub @tier(app)
+fn as_array(v: CborValue) -> Result<[CborValue], CborError>
+    match v
+        CborArray(items) => Ok(items[:])
+        _                => Err(CborWrongType(-1, "array", type_name(v)))
 
 // The entries of `v`, in the order the document wrote them, or
 // `CborWrongType`.
-pub fn as_map(v: CborValue) -> Result<[CborPair], CborError>
-    todo("cborfmt.as_map")
+pub @tier(app)
+fn as_map(v: CborValue) -> Result<[CborPair], CborError>
+    match v
+        CborMap(entries) => Ok(entries[:])
+        _                => Err(CborWrongType(-1, "map", type_name(v)))
 
 // `v` with every enclosing tag removed.
 //
@@ -276,7 +334,27 @@ pub fn as_map(v: CborValue) -> Result<[CborPair], CborError>
 //     println(cborfmt.type_name(cborfmt.untagged(doc)))   // text
 // ```
 pub fn untagged(v: CborValue) -> CborValue
-    todo("cborfmt.untagged")
+    match v
+        CborTagged(_, item) => untagged(item)
+        _                   => v
+
+// Whether a map key is the text `key`.
+fn key_is(k: CborValue, key: Str) -> Bool
+    match k
+        CborText(t) => t == key
+        _           => false
+
+// The value the first entry under this text key holds.
+//
+// A miss is reported as `CborWrongType` with the key as `want` and
+// `absent` as `saw`: a document that does not carry the key is not a
+// type error, and there is no separate variant for it.
+@tier(app)
+fn lookup(entries: [CborPair], key: Str) -> Result<CborValue, CborError>
+    for e in entries
+        if key_is(e.key, key)
+            return Ok(e.value)
+    Err(CborWrongType(-1, key, "absent"))
 
 // The value `key` maps to in `v`, looked up by TEXT key, or
 // `CborWrongType`.
@@ -286,37 +364,40 @@ pub fn untagged(v: CborValue) -> CborValue
 // decide whether `1` and `1.0` are the same key, and RFC 8949 § 5.6
 // leaves that to the application.  A caller with non-text keys walks
 // `as_map`.
-pub fn get(v: CborValue, key: Str) -> Result<CborValue, CborError>
-    todo("cborfmt.get")
+pub @tier(app)
+fn get(v: CborValue, key: Str) -> Result<CborValue, CborError>
+    match v
+        CborMap(entries) => lookup(entries, key)
+        _                => Err(CborWrongType(-1, "map", type_name(v)))
 
 // ── The tags a program actually meets ───────────────────────────────
 
 // Tag 0: a standard date/time string, RFC 3339.
 pub fn tag_datetime_text() -> Int
-    todo("cborfmt.tag_datetime_text")
+    0
 
 // Tag 1: an epoch-based date/time — seconds since 1970-01-01T00:00:00Z,
 // as an integer or a float.
 pub fn tag_datetime_epoch() -> Int
-    todo("cborfmt.tag_datetime_epoch")
+    1
 
 // Tag 2: an unsigned bignum, carried as a big-endian byte string.
 pub fn tag_bignum_unsigned() -> Int
-    todo("cborfmt.tag_bignum_unsigned")
+    2
 
 // Tag 3: a negative bignum.  The byte string `n` stands for `-1 - n`,
 // exactly as major type 1's argument does.
 pub fn tag_bignum_negative() -> Int
-    todo("cborfmt.tag_bignum_negative")
+    3
 
 // Tag 4: a decimal fraction — a two-element array of an exponent and a
 // mantissa, meaning `mantissa * 10 ^ exponent`.
 pub fn tag_decimal_fraction() -> Int
-    todo("cborfmt.tag_decimal_fraction")
+    4
 
 // Tag 5: a bigfloat — the same two-element array, base 2.
 pub fn tag_bigfloat() -> Int
-    todo("cborfmt.tag_bigfloat")
+    5
 
 // Tag 55799: self-described CBOR.
 //
@@ -325,7 +406,7 @@ pub fn tag_bigfloat() -> Int
 // as CBOR without being parsed.  A caller writing a file wants it; a
 // caller writing a network message does not.
 pub fn tag_self_described() -> Int
-    todo("cborfmt.tag_self_described")
+    55799
 
 // A date/time, as tag 0 or tag 1 carries one.
 //
@@ -375,8 +456,19 @@ pub struct CborDecimal
 // `text` is written as given and is not validated against RFC 3339 —
 // a `core` package has no calendar, and a validator that half-knew the
 // grammar would be worse than one that does not claim to.
-pub fn datetime_text_value(text: Str) -> CborValue
-    todo("cborfmt.datetime_text_value")
+pub @tier(app)
+fn datetime_text_value(text: Str) -> CborValue
+    CborTagged(tag_datetime_text(), CborText(text))
+
+// The value for an integer: major type 0 when it is not negative and
+// major type 1 when it is.  `CborUnsigned` around a negative number
+// would encode as an eight-byte argument pattern, which is a different
+// document.
+@tier(app)
+fn int_value(n: Int) -> CborValue
+    if n < 0
+        return CborNegative(n)
+    CborUnsigned(n)
 
 // The value for a date/time in the epoch form, tag 1.
 //
@@ -384,8 +476,28 @@ pub fn datetime_text_value(text: Str) -> CborValue
 // package has no clock, which is the same rule that makes a gzip
 // header's mtime a parameter and is what makes a document
 // reproducible.
-pub fn datetime_epoch_value(seconds: Int) -> CborValue
-    todo("cborfmt.datetime_epoch_value")
+pub @tier(app)
+fn datetime_epoch_value(seconds: Int) -> CborValue
+    CborTagged(tag_datetime_epoch(), int_value(seconds))
+
+// A float epoch split into whole seconds and the fraction after them.
+// The fraction keeps the float's sign, so -0.5 is zero seconds and
+// minus half a second.
+@tier(app)
+fn epoch_fields(f: Float) -> CborDateTime
+    let whole = float.to_int(f)
+    CborDateEpoch(whole, f - whole as Float)
+
+// The payload of a tag 1, which may be an integer or a float.
+@tier(app)
+fn epoch_of(item: CborValue) -> Result<CborDateTime, CborError>
+    match item
+        CborUnsigned(s) => Ok(CborDateEpoch(s, 0.0))
+        CborNegative(s) => Ok(CborDateEpoch(s, 0.0))
+        CborFloat16(f)  => Ok(epoch_fields(f))
+        CborFloat32(f)  => Ok(epoch_fields(f))
+        CborFloat64(f)  => Ok(epoch_fields(f))
+        _               => Err(CborBadTagPayload(-1, tag_datetime_epoch()))
 
 // The date/time `v` carries, or `CborWrongType` when it is not tagged 0
 // or 1, or `CborBadTagPayload` when the payload is the wrong shape.
@@ -399,29 +511,169 @@ pub fn datetime_epoch_value(seconds: Int) -> CborValue
 //         Ok(CborDateText(t))     => println(t)
 //         Err(e)                  => println(e.message())
 // ```
-pub fn datetime_of(v: CborValue) -> Result<CborDateTime, CborError>
-    todo("cborfmt.datetime_of")
+pub @tier(app)
+fn datetime_of(v: CborValue) -> Result<CborDateTime, CborError>
+    match v
+        CborTagged(tag, item) =>
+            if tag == tag_datetime_text()
+                match item
+                    CborText(t) => Ok(CborDateText(t))
+                    _           => Err(CborBadTagPayload(-1, tag))
+            else if tag == tag_datetime_epoch()
+                epoch_of(item)
+            else
+                Err(CborWrongType(-1, "tag 0 or tag 1", type_name(v)))
+        _                     => Err(CborWrongType(-1, "tag 0 or tag 1", type_name(v)))
 
 // The value for `n` as tag 2 or tag 3.
-pub fn bignum_value(n: CborBigNum) -> CborValue
-    todo("cborfmt.bignum_value")
+pub @tier(app)
+fn bignum_value(n: CborBigNum) -> CborValue
+    if n.negative
+        return CborTagged(tag_bignum_negative(), CborBytes(n.magnitude))
+    CborTagged(tag_bignum_unsigned(), CborBytes(n.magnitude))
 
 // The bignum `v` carries, or `CborWrongType` when it is not tagged 2 or
 // 3, or `CborBadTagPayload` when the payload is not a byte string.
-pub fn bignum_of(v: CborValue) -> Result<CborBigNum, CborError>
-    todo("cborfmt.bignum_of")
+pub @tier(app)
+fn bignum_of(v: CborValue) -> Result<CborBigNum, CborError>
+    match v
+        CborTagged(tag, item) =>
+            if tag == tag_bignum_unsigned() or tag == tag_bignum_negative()
+                match item
+                    CborBytes(m) =>
+                        Ok(CborBigNum { magnitude: m, negative: tag == tag_bignum_negative() })
+                    _            => Err(CborBadTagPayload(-1, tag))
+            else
+                Err(CborWrongType(-1, "tag 2 or tag 3", type_name(v)))
+        _                     => Err(CborWrongType(-1, "tag 2 or tag 3", type_name(v)))
+
+// The magnitude as a non-negative `Int`, when it fits one.
+//
+// Eight bytes is the widest that can, and only while the top bit is
+// clear — which is exactly when the accumulation does not turn
+// negative.
+@tier(app)
+fn fit_int(m: Bytes) -> ?Int
+    let n = bytes.len(m)
+    if n > 8
+        return None
+    var x = 0
+    for i in 0..n
+        x = (x << 8) | (bytes.byte_at(m, i) ?? 0)
+    if x < 0
+        return None
+    Some(x)
+
+// The value for a magnitude: the integer itself while it fits a signed
+// `Int`, and tag 2 or tag 3 around the byte string when it does not.
+//
+// The tag permits either, and the integer is the shorter form — which
+// is why `4([-2, 27315])` carries a two-byte argument and not a bignum.
+@tier(app)
+fn magnitude_value(n: CborBigNum) -> CborValue
+    match fit_int(n.magnitude)
+        None    => bignum_value(n)
+        Some(m) =>
+            if n.negative
+                CborNegative(-1 - m)
+            else
+                CborUnsigned(m)
 
 // The value for `d` as tag 4.
-pub fn decimal_value(d: CborDecimal) -> CborValue
-    todo("cborfmt.decimal_value")
+pub @tier(app)
+fn decimal_value(d: CborDecimal) -> CborValue
+    CborTagged(tag_decimal_fraction(),
+               CborArray([int_value(d.exponent), magnitude_value(d.mantissa)]))
+
+// The fewest big-endian bytes whose value is `n`, one byte for zero.
+@tier(app)
+fn be_bytes(n: Int) -> Bytes
+    var len = 1
+    var x = n
+    while x > 255
+        x = x / 256
+        len = len + 1
+    var out = bytes.zeros(len)
+    var rest = n
+    for i in 0..len
+        bytes.set_u8(out, len - 1 - i, rest % 256)
+        rest = rest / 256
+    out
+
+// The eight big-endian bytes of a 64-bit pattern, which is how a
+// `CborWideInt` carries its magnitude.
+@tier(app)
+fn pattern_bytes(pattern: Int) -> Bytes
+    var out = bytes.zeros(8)
+    for i in 0..8
+        bytes.set_u8(out, i, (pattern >>> (8 * (7 - i))) & 255)
+    out
+
+// The exponent of a decimal fraction, which the tag says is an integer.
+@tier(app)
+fn exponent_of(v: CborValue) -> Result<Int, CborError>
+    match v
+        CborUnsigned(n) => Ok(n)
+        CborNegative(n) => Ok(n)
+        _               => Err(CborBadTagPayload(-1, tag_decimal_fraction()))
+
+// The magnitude `v` carries: an integer of either major type, a
+// `CborWideInt`'s pattern, or a tag 2 or tag 3 byte string.
+@tier(app)
+fn magnitude_of(v: CborValue) -> Result<CborBigNum, CborError>
+    match v
+        CborUnsigned(n)             => Ok(CborBigNum { magnitude: be_bytes(n), negative: false })
+        CborNegative(n)             => Ok(CborBigNum { magnitude: be_bytes(-1 - n), negative: true })
+        CborWideInt(major, pattern) =>
+            Ok(CborBigNum { magnitude: pattern_bytes(pattern),
+                            negative: major == cborhead.major_negative() })
+        CborTagged(tag, item)       =>
+            if tag == tag_bignum_unsigned() or tag == tag_bignum_negative()
+                match item
+                    CborBytes(m) =>
+                        Ok(CborBigNum { magnitude: m, negative: tag == tag_bignum_negative() })
+                    _            => Err(CborBadTagPayload(-1, tag))
+            else
+                Err(CborBadTagPayload(-1, tag_decimal_fraction()))
+        _                           => Err(CborBadTagPayload(-1, tag_decimal_fraction()))
+
+// The two members of a tag 4 array, one of them at a time.
+@tier(app)
+fn decimal_parts(e: CborValue, m: CborValue) -> Result<CborDecimal, CborError>
+    let exp = exponent_of(e)!
+    let mag = magnitude_of(m)!
+    Ok(CborDecimal { exponent: exp, mantissa: mag })
+
+// The payload of a tag 4, which the tag says is a two-element array.
+@tier(app)
+fn decimal_body(item: CborValue) -> Result<CborDecimal, CborError>
+    match item
+        CborArray(parts) =>
+            if list.len(parts) == 2
+                decimal_parts(parts[0], parts[1])
+            else
+                Err(CborBadTagPayload(-1, tag_decimal_fraction()))
+        _                => Err(CborBadTagPayload(-1, tag_decimal_fraction()))
 
 // The decimal fraction `v` carries, or `CborWrongType` when it is not
 // tagged 4, or `CborBadTagPayload` when the payload is not a
 // two-element array of an exponent and an integer or bignum mantissa.
-pub fn decimal_of(v: CborValue) -> Result<CborDecimal, CborError>
-    todo("cborfmt.decimal_of")
+pub @tier(app)
+fn decimal_of(v: CborValue) -> Result<CborDecimal, CborError>
+    match v
+        CborTagged(tag, item) =>
+            if tag == tag_decimal_fraction()
+                decimal_body(item)
+            else
+                Err(CborWrongType(-1, "tag 4", type_name(v)))
+        _                     => Err(CborWrongType(-1, "tag 4", type_name(v)))
 
 // ── Writing ─────────────────────────────────────────────────────────
+
+// An argument wide enough to force additional information 27, which is
+// the head a `CborWideInt` always wears whatever its bit pattern is.
+fn wide_argument() -> Int
+    4294967296
 
 // The first byte the shortest encoding of `v` begins with.
 //
@@ -429,7 +681,121 @@ pub fn decimal_of(v: CborValue) -> Result<CborDecimal, CborError>
 // reads, and what a caller peeking at a document's first byte compares
 // against.
 pub fn initial_byte(v: CborValue) -> Int
-    todo("cborfmt.initial_byte")
+    match v
+        CborUnsigned(n)       => cborhead.initial_byte(cborhead.major_unsigned(), n)
+        CborNegative(n)       => cborhead.initial_byte(cborhead.major_negative(),
+                                                       cborhead.negative_arg(n))
+        CborWideInt(major, _) => cborhead.initial_byte(major, wide_argument())
+        CborBytes(b)          => cborhead.initial_byte(cborhead.major_bytes(), bytes.len(b))
+        CborText(t)           => cborhead.initial_byte(cborhead.major_text(), str.len(t))
+        CborArray(items)      => cborhead.initial_byte(cborhead.major_array(), list.len(items))
+        CborMap(entries)      => cborhead.initial_byte(cborhead.major_map(), list.len(entries))
+        CborTagged(tag, _)    => cborhead.initial_byte(cborhead.major_tag(), tag)
+        CborBool(b)           => if b
+            0xF5
+        else
+            0xF4
+        CborNull              => 0xF6
+        CborUndefined         => 0xF7
+        CborSimple(s)         => if s <= 23
+            0xE0 + s
+        else
+            0xF8
+        CborFloat16(_)        => 0xF9
+        CborFloat32(_)        => 0xFA
+        CborFloat64(_)        => 0xFB
+
+// `x` shifted right by `shift` bits, rounded to nearest with ties to
+// even.  A carry out of the mantissa moves into the exponent, which is
+// the right answer for both a normal and a subnormal value.
+fn rounded(x: Int, shift: Int) -> Int
+    let kept = x >>> shift
+    let rest = x & ((1 << shift) - 1)
+    let half = 1 << (shift - 1)
+    if rest > half or rest == half and (kept & 1) == 1
+        return kept + 1
+    kept
+
+// The binary16 bit pattern nearest a binary64 value, ties to even.
+//
+// A NaN is canonicalised here rather than carried: RFC 8949 § 4.2.1
+// fixes the encoding of a NaN at f97e00, and a NaN's payload is not a
+// value that survives any round trip.
+fn f16_bits(f: Float) -> Int
+    if math.is_nan(f)
+        return 0x7E00
+    let b = float.to_bits(f)
+    let sign = (b >>> 63) << 15
+    let exp = (b >>> 52) & 0x7FF
+    let frac = b & 0xFFFFFFFFFFFFF
+    if exp == 0x7FF
+        return sign | 0x7C00
+    let e = exp - 1023 + 15
+    if e >= 0x1F
+        return sign | 0x7C00
+    if e >= 1
+        return sign | rounded((e << 52) | frac, 42)
+    let shift = 43 - e
+    if shift > 54
+        return sign
+    sign | rounded(frac | (1 << 52), shift)
+
+// The binary64 value of a binary16 bit pattern, which is exact.
+fn f16_value(pattern: Int) -> Float
+    let sign = (pattern >>> 15) & 1
+    let exp = (pattern >>> 10) & 0x1F
+    let frac = pattern & 0x3FF
+    if exp == 0x1F
+        return float.from_bits((sign << 63) | (0x7FF << 52) | (frac << 42))
+    if exp == 0
+        let magnitude = frac as Float * float.from_bits((1023 - 24) << 52)
+        return float.from_bits(float.to_bits(magnitude) | (sign << 63))
+    float.from_bits((sign << 63) | ((exp - 15 + 1023) << 52) | (frac << 42))
+
+// The binary32 bit pattern nearest a binary64 value, ties to even.
+fn f32_bits(f: Float) -> Int
+    let b = float.to_bits(f)
+    let sign = (b >>> 63) << 31
+    let exp = (b >>> 52) & 0x7FF
+    let frac = b & 0xFFFFFFFFFFFFF
+    if exp == 0x7FF
+        return sign | 0x7F800000 | (if frac != 0 then 0x400000 | (frac >>> 29) else 0)
+    let e = exp - 1023 + 127
+    if e >= 0xFF
+        return sign | 0x7F800000
+    if e >= 1
+        return sign | rounded((e << 52) | frac, 29)
+    let shift = 30 - e
+    if shift > 54
+        return sign
+    sign | rounded(frac | (1 << 52), shift)
+
+// The binary64 value of a binary32 bit pattern, which is exact.
+fn f32_value(pattern: Int) -> Float
+    let sign = (pattern >>> 31) & 1
+    let exp = (pattern >>> 23) & 0xFF
+    let frac = pattern & 0x7FFFFF
+    if exp == 0xFF
+        return float.from_bits((sign << 63) | (0x7FF << 52) | (frac << 29))
+    if exp == 0
+        let magnitude = frac as Float * float.from_bits((1023 - 149) << 52)
+        return float.from_bits(float.to_bits(magnitude) | (sign << 63))
+    float.from_bits((sign << 63) | ((exp - 127 + 1023) << 52) | (frac << 29))
+
+// How many bytes the deterministic encoding of `f` occupies: the
+// narrowest of the three widths that reads back as the same value.
+//
+// A NaN is three bytes by the specification's rule rather than by a
+// round-trip test, because a NaN is not equal to itself and the round
+// trip would answer the widest width every time.
+fn canonical_float_len(f: Float) -> Int
+    if math.is_nan(f)
+        return 3
+    if f16_value(f16_bits(f)) == f
+        return 3
+    if f32_value(f32_bits(f)) == f
+        return 5
+    9
 
 // How many bytes `v` encodes to in `mode`, without encoding it.
 //
@@ -444,7 +810,214 @@ pub fn initial_byte(v: CborValue) -> Int
 //     println("${cborfmt.encoded_len(CborUnsigned(1), CborShortest)}")   // 1
 // ```
 pub fn encoded_len(v: CborValue, mode: CborMode) -> Int
-    todo("cborfmt.encoded_len")
+    match v
+        CborUnsigned(n)       => cborhead.head_len(n)
+        CborNegative(n)       => cborhead.head_len(cborhead.negative_arg(n))
+        CborWideInt(_, _)     => 9
+        CborBytes(b)          => cborhead.head_len(bytes.len(b)) + bytes.len(b)
+        CborText(t)           => cborhead.head_len(str.len(t)) + str.len(t)
+        CborArray(items)      =>
+            var total = cborhead.head_len(list.len(items))
+            for item in items
+                total = total + encoded_len(item, mode)
+            total
+        CborMap(entries)      =>
+            var total = cborhead.head_len(list.len(entries))
+            for e in entries
+                total = total + encoded_len(e.key, mode) + encoded_len(e.value, mode)
+            total
+        CborTagged(tag, item) => cborhead.head_len(tag) + encoded_len(item, mode)
+        CborBool(_)           => 1
+        CborNull              => 1
+        CborUndefined         => 1
+        CborSimple(s)         => if s <= 23
+            1
+        else
+            2
+        CborFloat16(f)        => if mode == CborCanonical
+            canonical_float_len(f)
+        else
+            3
+        CborFloat32(f)        => if mode == CborCanonical
+            canonical_float_len(f)
+        else
+            5
+        CborFloat64(f)        => if mode == CborCanonical
+            canonical_float_len(f)
+        else
+            9
+
+// ── The writer's own machinery ──────────────────────────────────────
+
+// Write the head for `major` and `arg`: the initial byte, then the
+// argument big-endian in the fewest bytes that hold it.
+//
+// `arg` may be a `CborWideInt`'s 64-bit pattern, which is negative when
+// the top bit is set; the shift is unsigned so the eight bytes come out
+// as the pattern rather than as a sign extension.
+fn put_head(var dst: Cursor, major: Int, arg: Int)
+    let len = cborhead.head_len(arg)
+    dst.put_u8(cborhead.initial_byte(major, arg))
+    for k in 1..len
+        dst.put_u8((arg >>> (8 * (len - 1 - k))) & 255)
+
+// A simple value: the value itself in the five bits while it fits, and
+// the one-byte form otherwise.  Values 24 to 31 have no one-byte form,
+// which is what sends them through the second branch.
+fn put_simple(var dst: Cursor, v: Int)
+    if v <= 23
+        dst.put_u8(0xE0 + v)
+        return
+    dst.put_u8(0xF8)
+    dst.put_u8(v % 256)
+
+// A float at the width the mode asks for: the one the value declares,
+// or the narrowest that reads back the same in the deterministic mode.
+fn put_float(var dst: Cursor, f: Float, mode: CborMode, declared: Int)
+    if mode == CborCanonical
+        let width = canonical_float_len(f)
+        if width == 3
+            put_half(dst, f)
+            return
+        if width == 5
+            put_single(dst, f)
+            return
+        put_double(dst, f)
+        return
+    if declared == 3
+        put_half(dst, f)
+        return
+    if declared == 5
+        put_single(dst, f)
+        return
+    put_double(dst, f)
+
+// The half-precision form, `f9` and two bytes.
+fn put_half(var dst: Cursor, f: Float)
+    let pattern = f16_bits(f)
+    dst.put_u8(0xF9)
+    dst.put_u8((pattern >>> 8) & 255)
+    dst.put_u8(pattern & 255)
+
+// The single-precision form, `fa` and four bytes.
+fn put_single(var dst: Cursor, f: Float)
+    let pattern = f32_bits(f)
+    dst.put_u8(0xFA)
+    for k in 0..4
+        dst.put_u8((pattern >>> (8 * (3 - k))) & 255)
+
+// The double-precision form, `fb` and eight bytes.
+fn put_double(var dst: Cursor, f: Float)
+    let pattern = float.to_bits(f)
+    dst.put_u8(0xFB)
+    for k in 0..8
+        dst.put_u8((pattern >>> (8 * (7 - k))) & 255)
+
+// Whether `a` sorts before `b` in the bytewise lexicographic order RFC
+// 8949 § 4.2.1 defines, in which a prefix sorts before anything it
+// begins.
+@tier(app)
+fn bytes_before(a: Bytes, b: Bytes) -> Bool
+    let n = bytes.len(a)
+    let m = bytes.len(b)
+    var i = 0
+    while i < n and i < m
+        let x = bytes.byte_at(a, i) ?? 0
+        let y = bytes.byte_at(b, i) ?? 0
+        if x != y
+            return x < y
+        i = i + 1
+    n < m
+
+// The value `t` written at the cursor, as text: a text head for its
+// byte length, then the bytes.
+@tier(app)
+fn put_text(var dst: Cursor, t: Str)
+    let b = bytes.from_str(t)
+    put_head(dst, cborhead.major_text(), bytes.len(b))
+    dst.put_bytes(b)
+
+// `e` inserted among `entries` before the first key that sorts after
+// it, and a new list answered.
+//
+// An insertion rather than `list.sort_by`, because the key is the bytes
+// of the entry's own encoding and not a scalar the library can order;
+// and an insertion that steps over equal keys rather than around them,
+// so a map written with duplicate keys keeps the order it was given.
+@tier(app)
+fn insert_entry(entries: [CborPair], e: CborPair) -> [CborPair]
+    let mine = encode(e.key, CborCanonical)
+    var inserted = false
+    var out: [CborPair] = []
+    for x in entries
+        let theirs = encode(x.key, CborCanonical)
+        if not inserted and bytes_before(mine, theirs)
+            list.push(out, e)
+            inserted = true
+        list.push(out, x)
+    if not inserted
+        list.push(out, e)
+    out
+
+// `entries` in the order the deterministic encoding requires: sorted by
+// the bytes of each key's own encoding.
+@tier(app)
+fn canonical_order(entries: [CborPair]) -> [CborPair]
+    var out: [CborPair] = []
+    for e in entries
+        out = insert_entry(out, e)
+    out
+
+// Write a `CborWideInt`'s head: additional information 27 and the
+// argument's eight bytes, whatever the pattern is.
+//
+// The eight bytes are written rather than the shortest head for them,
+// because a wide integer IS major type 0 or 1 with an eight-byte
+// argument: `encoded_len` says nine bytes and `initial_byte` reads
+// `0x1b` or `0x3b`, so a shortest head here would encode a document the
+// two of them do not describe.  The shift is unsigned so the bytes come
+// out as the pattern rather than as a sign extension.
+fn put_wide_head(var dst: Cursor, major: Int, pattern: Int)
+    dst.put_u8(cborhead.initial_byte(major, wide_argument()))
+    for k in 0..8
+        dst.put_u8((pattern >>> (8 * (7 - k))) & 255)
+
+// Write `v` at the cursor.
+@tier(app)
+fn write(var dst: Cursor, v: CborValue, mode: CborMode)
+    match v
+        CborUnsigned(n)             => put_head(dst, cborhead.major_unsigned(), n)
+        CborNegative(n)             => put_head(dst, cborhead.major_negative(),
+                                          cborhead.negative_arg(n))
+        CborWideInt(major, pattern) => put_wide_head(dst, major, pattern)
+        CborBytes(b)                =>
+            put_head(dst, cborhead.major_bytes(), bytes.len(b))
+            dst.put_bytes(b)
+        CborText(t)                 => put_text(dst, t)
+        CborArray(items)            =>
+            put_head(dst, cborhead.major_array(), list.len(items))
+            for item in items
+                write(dst, item, mode)
+        CborMap(entries)            =>
+            put_head(dst, cborhead.major_map(), list.len(entries))
+            if mode == CborCanonical
+                for e in canonical_order(entries)
+                    write(dst, e.key, mode)
+                    write(dst, e.value, mode)
+            else
+                for e in entries
+                    write(dst, e.key, mode)
+                    write(dst, e.value, mode)
+        CborTagged(tag, item)       =>
+            put_head(dst, cborhead.major_tag(), tag)
+            write(dst, item, mode)
+        CborBool(b)                 => put_simple(dst, (if b then 21 else 20))
+        CborNull                    => put_simple(dst, 22)
+        CborUndefined               => put_simple(dst, 23)
+        CborSimple(s)               => put_simple(dst, s)
+        CborFloat16(f)              => put_float(dst, f, mode, 3)
+        CborFloat32(f)              => put_float(dst, f, mode, 5)
+        CborFloat64(f)              => put_float(dst, f, mode, 9)
 
 // Encode `v` and answer the bytes.
 //
@@ -460,16 +1033,25 @@ pub fn encoded_len(v: CborValue, mode: CborMode) -> Int
 //     println(bytes.to_hex(cborfmt.encode(doc, CborShortest)))
 //     // 820102 — an array of two, then two one-byte integers
 // ```
-pub fn encode(v: CborValue, mode: CborMode) -> Bytes
-    todo("cborfmt.encode")
+pub @tier(app)
+fn encode(v: CborValue, mode: CborMode) -> Bytes
+    var dst = bytes.cursor_be(bytes.zeros(encoded_len(v, mode)))
+    write(dst, v, mode)
+    dst.finish()
 
 // Encode `v` into a buffer the caller already owns, and answer the
 // bytes written.
 //
 // `CborBufferTooSmall` when the cursor has less room than `encoded_len`
 // says, and nothing is written in that case.
-pub fn encode_into(v: CborValue, mode: CborMode, var dst: Cursor) -> Result<Int, CborError>
-    todo("cborfmt.encode_into")
+pub @tier(app)
+fn encode_into(v: CborValue, mode: CborMode, var dst: Cursor) -> Result<Int, CborError>
+    let need = encoded_len(v, mode)
+    let have = dst.remaining()
+    if need > have
+        return Err(CborBufferTooSmall(need, have))
+    write(dst, v, mode)
+    Ok(need)
 
 // Whether `src` is what `CborCanonical` would have produced for the
 // value it decodes to.
@@ -479,8 +1061,10 @@ pub fn encode_into(v: CborValue, mode: CborMode, var dst: Cursor) -> Result<Int,
 // bytes for equal values, and a document that is not in that form has
 // to be re-encoded before its hash means anything.  A byte sequence
 // that does not decode at all answers the decoder's own error.
-pub fn is_canonical(src: Bytes) -> Result<Bool, CborError>
-    todo("cborfmt.is_canonical")
+pub @tier(app)
+fn is_canonical(src: Bytes) -> Result<Bool, CborError>
+    let v = decode(src)!
+    Ok(encode(v, CborCanonical) == src)
 
 // ── Reading bytes ───────────────────────────────────────────────────
 
@@ -502,8 +1086,13 @@ pub fn is_canonical(src: Bytes) -> Result<Bool, CborError>
 //         Ok(v)  => println(cborfmt.type_name(v))   // null
 //         Err(e) => println(e.message())
 // ```
-pub fn decode(src: Bytes) -> Result<CborValue, CborError>
-    todo("cborfmt.decode")
+pub @tier(app)
+fn decode(src: Bytes) -> Result<CborValue, CborError>
+    let p = read(src, 0, 1, default_depth_limit())!
+    let n = bytes.len(src)
+    if p.consumed < n
+        return Err(CborTrailingBytes(p.consumed, n - p.consumed))
+    Ok(p.value)
 
 // One value and the bytes it occupied: what `decode_prefix` answers.
 //
@@ -519,8 +1108,30 @@ pub struct CborPrefix
 // What a caller reading a sequence of documents out of one buffer
 // wants — which RFC 8742 calls a CBOR sequence, and which is exactly
 // "one document after another with nothing between them".
-pub fn decode_prefix(src: Bytes) -> Result<CborPrefix, CborError>
-    todo("cborfmt.decode_prefix")
+pub @tier(app)
+fn decode_prefix(src: Bytes) -> Result<CborPrefix, CborError>
+    read(src, 0, 1, default_depth_limit())
+
+// Decode the first document in `src` with a nesting limit of the
+// caller's choosing, and say how long it was.
+//
+// `decode_prefix` with `limit` in place of `default_depth_limit()`.  A
+// limit below 1 is taken as 1, because a document is at least one value
+// deep.  `cbordec` reads each value through this, with the limit its
+// decoder carries.
+//
+// ```novo
+// use std.bytes
+// use cborfmt
+//
+// fn main() [io]
+//     match cborfmt.decode_prefix_limited(bytes.from_hex("8181f6") ?? bytes.zeros(0), 1)
+//         Ok(p)  => println("${p.consumed}")
+//         Err(e) => println(e.message())   // nests past the limit of 1
+// ```
+pub @tier(app)
+fn decode_prefix_limited(src: Bytes, limit: Int) -> Result<CborPrefix, CborError>
+    read(src, 0, 1, (if limit < 1 then 1 else limit))
 
 // The deepest nesting `decode` and `decode_prefix` accept: 64.
 //
@@ -530,4 +1141,342 @@ pub fn decode_prefix(src: Bytes) -> Result<CborPrefix, CborError>
 // `CborDepthExceeded`, and `cbordec.with_depth_limit` is how a caller
 // who genuinely has deeper data raises it.
 pub fn default_depth_limit() -> Int
-    todo("cborfmt.default_depth_limit")
+    64
+
+// ── The reader's own machinery ──────────────────────────────────────
+
+// A step of the reader: a value and the offset just past it, or the
+// break byte that closes an indefinite-length item and where it was
+// found.
+//
+// The break is a step of its own rather than an error because inside an
+// indefinite-length item it is the end of the item, and only `read`
+// knows whether one was open.
+enum CborStep
+    CborStepValue(v: CborValue, next: Int)
+    CborStepBreak(at: Int)
+
+// How many argument bytes the additional information announces: none
+// for a value that fits the five bits, then one, two, four or eight.
+fn arg_width(info: Int) -> Int
+    match info
+        _ if info <= 23 => 0
+        24              => 1
+        25              => 2
+        26              => 4
+        _               => 8
+
+// How many bytes are missing when `need` were announced and `have` are
+// there.
+//
+// A length of 2^63 or more does not fit a signed `Int` and arrives
+// negative, and no honest count of bytes completes such a value, so the
+// answer saturates rather than turning into a small positive number.
+fn shortfall(need: Int, have: Int) -> Int
+    if need < 0
+        return 9223372036854775807
+    if need > have
+        return need - have
+    // cov: skip — every caller asks only after a length was found short
+    0
+
+// The offset of the first byte that breaks UTF-8 in `b`, or -1: an
+// unexpected continuation byte, a truncated sequence, an overlong form,
+// a surrogate, or a code point past U+10FFFF.
+@tier(app)
+fn utf8_fault(b: Bytes) -> Int
+    let n = bytes.len(b)
+    var i = 0
+    for _ in 0..n
+        if i >= n
+            break
+        let c = bytes.byte_at(b, i) ?? 0
+        let width = if c < 0x80
+            1
+        else
+            if c >= 0xC2 and c <= 0xDF
+                2
+            else
+                if c >= 0xE0 and c <= 0xEF
+                    3
+                else
+                    if c >= 0xF0 and c <= 0xF4
+                        4
+                    else
+                        0
+        if width == 0 or i + width > n
+            return i
+        if width > 1
+            let second = bytes.byte_at(b, i + 1) ?? 0
+            let low = if c == 0xE0
+                0xA0
+            else
+                if c == 0xF0
+                    0x90
+                else
+                    0x80
+            let high = if c == 0xED
+                0x9F
+            else
+                if c == 0xF4
+                    0x8F
+                else
+                    0xBF
+            if second < low or second > high
+                return i
+            for k in i + 2..i + width
+                if ((bytes.byte_at(b, k) ?? 0) & 0xC0) != 0x80
+                    return i
+        i = i + width
+    -1
+
+// The value at `at`, `depth` levels deep, in a document whose nesting
+// limit is `limit`: the offset just past the value, or the break the
+// caller must decide about.
+//
+// One byte of head first, and the depth check is here rather than in
+// each container so that one place turns a document of a hundred
+// thousand array heads into an error instead of a hundred thousand
+// frames.
+@tier(app)
+fn step(src: Bytes, at: Int, depth: Int, limit: Int) -> Result<CborStep, CborError>
+    let n = bytes.len(src)
+    if at >= n
+        return Err(CborTruncated(at, at + 1 - n))
+    let b = bytes.byte_at(src, at) ?? 0
+    if b == 0xFF
+        return Ok(CborStepBreak(at))
+    if depth > limit
+        return Err(CborDepthExceeded(at, limit))
+    let major = b / 32
+    let info = b % 32
+    if info >= 28 and info <= 30
+        return Err(CborReservedInfo(at, info))
+    if info == 31
+        return indefinite(src, at, major, depth, limit)
+    let width = arg_width(info)
+    let body = at + 1
+    if body + width > n
+        return Err(CborTruncated(at, body + width - n))
+    var arg = if width == 0
+        info
+    else
+        0
+    for i in 0..width
+        arg = (arg << 8) | (bytes.byte_at(src, body + i) ?? 0)
+    let next = body + width
+    if major == cborhead.major_unsigned()
+        if info == 27 and arg < 0
+            return Ok(CborStepValue(CborWideInt(major, arg), next))
+        return Ok(CborStepValue(CborUnsigned(arg), next))
+    if major == cborhead.major_negative()
+        if info == 27 and arg < 0
+            return Ok(CborStepValue(CborWideInt(major, arg), next))
+        return Ok(CborStepValue(CborNegative(cborhead.negative_value(arg)), next))
+    if major == cborhead.major_bytes()
+        if arg < 0 or arg > n - next
+            return Err(CborTruncated(at, shortfall(arg, n - next)))
+        return Ok(CborStepValue(CborBytes(bytes.slice(src, next, next + arg)), next + arg))
+    if major == cborhead.major_text()
+        if arg < 0 or arg > n - next
+            return Err(CborTruncated(at, shortfall(arg, n - next)))
+        let raw = bytes.slice(src, next, next + arg)
+        let bad = utf8_fault(raw)
+        if bad >= 0
+            return Err(CborBadUtf8(next + bad))
+        return Ok(CborStepValue(CborText(bytes.to_str(raw)), next + arg))
+    if major == cborhead.major_array()
+        return read_array(src, at, next, arg, depth, limit)
+    if major == cborhead.major_map()
+        return read_map(src, at, next, arg, depth, limit)
+    if major == cborhead.major_tag()
+        let s = step(src, next, depth + 1, limit)!
+        match s
+            CborStepBreak(bt)          =>
+                return Err(CborUnexpectedBreak(bt))
+            CborStepValue(item, after) =>
+                return Ok(CborStepValue(CborTagged(arg, item), after))
+    if info == 20
+        return Ok(CborStepValue(CborBool(false), next))
+    if info == 21
+        return Ok(CborStepValue(CborBool(true), next))
+    if info == 22
+        return Ok(CborStepValue(CborNull, next))
+    if info == 23
+        return Ok(CborStepValue(CborUndefined, next))
+    if info == 25
+        return Ok(CborStepValue(CborFloat16(f16_value(arg)), next))
+    if info == 26
+        return Ok(CborStepValue(CborFloat32(f32_value(arg)), next))
+    if info == 27
+        return Ok(CborStepValue(CborFloat64(float.from_bits(arg)), next))
+    Ok(CborStepValue(CborSimple(arg), next))
+
+// The first value in `src` from `at`, with a break outside any
+// indefinite-length item refused: at the top of a document a break
+// closes nothing.
+@tier(app)
+fn read(src: Bytes, at: Int, depth: Int, limit: Int) -> Result<CborPrefix, CborError>
+    let s = step(src, at, depth, limit)!
+    match s
+        CborStepBreak(bt)      => Err(CborUnexpectedBreak(bt))
+        CborStepValue(v, next) => Ok(CborPrefix { value: v, consumed: next })
+
+// The `count` elements of a definite-length array whose head ended at
+// `body`.
+//
+// A count larger than the bytes that follow cannot be satisfied, and
+// checking it first is what keeps a bogus eight-byte count from turning
+// into a loop that never ends.
+@tier(app)
+fn read_array(src: Bytes, at: Int, body: Int, count: Int, depth: Int,
+              limit: Int) -> Result<CborStep, CborError>
+    let n = bytes.len(src)
+    if count < 0 or count > n - body
+        return Err(CborTruncated(at, shortfall(count, n - body)))
+    var items: [CborValue] = []
+    var next = body
+    for _ in 0..count
+        let s = step(src, next, depth + 1, limit)!
+        match s
+            CborStepBreak(bt)       =>
+                return Err(CborUnexpectedBreak(bt))
+            CborStepValue(v, after) =>
+                list.push(items, v)
+                next = after
+    Ok(CborStepValue(CborArray(items), next))
+
+// The `count` key-value pairs of a definite-length map whose head ended
+// at `body`.
+@tier(app)
+fn read_map(src: Bytes, at: Int, body: Int, count: Int, depth: Int,
+            limit: Int) -> Result<CborStep, CborError>
+    let n = bytes.len(src)
+    if count < 0 or count > n - body
+        return Err(CborTruncated(at, shortfall(count, n - body)))
+    var entries: [CborPair] = []
+    var next = body
+    for _ in 0..count
+        let k = step(src, next, depth + 1, limit)!
+        match k
+            CborStepBreak(bt)             =>
+                return Err(CborUnexpectedBreak(bt))
+            CborStepValue(key, after_key) =>
+                let v = step(src, after_key, depth + 1, limit)!
+                match v
+                    CborStepBreak(bt)           =>
+                        return Err(CborUnexpectedBreak(bt))
+                    CborStepValue(value, after) =>
+                        list.push(entries, CborPair { key: key, value: value })
+                        next = after
+    Ok(CborStepValue(CborMap(entries), next))
+
+// An indefinite-length item: a byte string, a text string, an array or
+// a map, each read until its break byte.  Anything else has no
+// indefinite form, which RFC 8949 § 3 says by giving additional
+// information 31 a meaning on those four major types only.
+@tier(app)
+fn indefinite(src: Bytes, at: Int, major: Int, depth: Int,
+              limit: Int) -> Result<CborStep, CborError>
+    if major == cborhead.major_bytes()
+        return indef_bytes(src, at, at + 1, depth, limit)
+    if major == cborhead.major_text()
+        return indef_text(src, at, at + 1, depth, limit)
+    if major == cborhead.major_array()
+        return indef_array(src, at, at + 1, depth, limit)
+    if major == cborhead.major_map()
+        return indef_map(src, at, at + 1, depth, limit)
+    Err(CborBadIndefinite(at, major))
+
+// The chunks of an indefinite-length byte string, concatenated.
+//
+// Every chunk must be a definite-length byte string of its own — RFC
+// 8949 § 3.2.3 — so a text chunk, or a chunk that opens an indefinite
+// string of its own, is refused rather than merged.
+@tier(app)
+fn indef_bytes(src: Bytes, at: Int, body: Int, depth: Int,
+               limit: Int) -> Result<CborStep, CborError>
+    let n = bytes.len(src)
+    var parts: [Bytes] = []
+    var next = body
+    while next < n
+        let b = bytes.byte_at(src, next) ?? 0
+        if b % 32 == 31 and b != 0xFF
+            return Err(CborBadChunk(next, b / 32))
+        let s = step(src, next, depth, limit)!
+        match s
+            CborStepBreak(bt)       =>
+                return Ok(CborStepValue(CborBytes(bytes.concat(parts)), bt + 1))
+            CborStepValue(v, after) =>
+                match v
+                    CborBytes(part) =>
+                        list.push(parts, bytes.clone(part))
+                        next = after
+                    _               =>
+                        return Err(CborBadChunk(next, b / 32))
+    Err(CborTruncated(next, next + 1 - n))
+
+// The chunks of an indefinite-length text string, concatenated.  Each
+// chunk is UTF-8 checked where it arrives, so a fault names the byte
+// inside the chunk that broke it.
+@tier(app)
+fn indef_text(src: Bytes, at: Int, body: Int, depth: Int, limit: Int) -> Result<CborStep, CborError>
+    let n = bytes.len(src)
+    var parts: [Str] = []
+    var next = body
+    while next < n
+        let b = bytes.byte_at(src, next) ?? 0
+        if b % 32 == 31 and b != 0xFF
+            return Err(CborBadChunk(next, b / 32))
+        let s = step(src, next, depth, limit)!
+        match s
+            CborStepBreak(bt)       =>
+                return Ok(CborStepValue(CborText(str.join(parts, "")), bt + 1))
+            CborStepValue(v, after) =>
+                match v
+                    CborText(part) =>
+                        list.push(parts, part)
+                        next = after
+                    _              =>
+                        return Err(CborBadChunk(next, b / 32))
+    Err(CborTruncated(next, next + 1 - n))
+
+// The elements of an indefinite-length array, read until its break.
+@tier(app)
+fn indef_array(src: Bytes, at: Int, body: Int, depth: Int,
+               limit: Int) -> Result<CborStep, CborError>
+    let n = bytes.len(src)
+    var items: [CborValue] = []
+    var next = body
+    while next < n
+        let s = step(src, next, depth + 1, limit)!
+        match s
+            CborStepBreak(bt)       =>
+                return Ok(CborStepValue(CborArray(items), bt + 1))
+            CborStepValue(v, after) =>
+                list.push(items, v)
+                next = after
+    Err(CborTruncated(next, next + 1 - n))
+
+// The pairs of an indefinite-length map, read until its break.  A break
+// where a value is due is a break in the middle of a pair, which RFC
+// 8949 § 3.2.1 does not allow.
+@tier(app)
+fn indef_map(src: Bytes, at: Int, body: Int, depth: Int, limit: Int) -> Result<CborStep, CborError>
+    let n = bytes.len(src)
+    var entries: [CborPair] = []
+    var next = body
+    while next < n
+        let k = step(src, next, depth + 1, limit)!
+        match k
+            CborStepBreak(bt)             =>
+                return Ok(CborStepValue(CborMap(entries), bt + 1))
+            CborStepValue(key, after_key) =>
+                let v = step(src, after_key, depth + 1, limit)!
+                match v
+                    CborStepBreak(bt)           =>
+                        return Err(CborUnexpectedBreak(bt))
+                    CborStepValue(value, after) =>
+                        list.push(entries, CborPair { key: key, value: value })
+                        next = after
+    Err(CborTruncated(next, next + 1 - n))

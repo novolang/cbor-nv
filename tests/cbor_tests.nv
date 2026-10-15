@@ -1,10 +1,8 @@
 // tests/cbor_tests.nv — the API tests, written against the signatures.
 //
-// They COMPILE today and they FAIL at run, with `not implemented:
-// cborfmt.<fn>` from the `todo()` that is each body.  That is the
-// expected state of an interface release: the compiler has checked
-// every signature, every type and every effect row, and nothing else
-// has been checked because there is nothing else yet.
+// Every body has landed, so they RUN: the compiler has checked every
+// signature, every type and every effect row, and each assertion below
+// compares an answer with the bytes RFC 8949's table gives for it.
 //
 // EVERY VECTOR IS RFC 8949's.  Appendix A is the specification's own
 // table of "diagnostic notation, encoded" pairs — a hundred-odd of them

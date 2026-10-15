@@ -1,0 +1,1276 @@
+// tests/cbor_nv_edge_tests.nv — the shapes `cbor_tests.nv` does not
+// reach: the head arithmetic at both ends of its ranges, every refusal
+// of the reader and of the trait bridge, the float widths at their
+// edges, the UTF-8 matrix, the indefinite forms the value tree
+// collapses, the stream's offsets and its resumability, and the
+// writer's own paths.
+//
+// The oracle is the contract.  This is the supplementary suite a landed
+// release carries so that the line under `src/` a caller can reach is
+// reached by a test rather than excused by a marker.
+
+use std.test
+use std.list
+use std.bytes
+use cborfmt
+use cbordec
+use cborhead
+use cborserde
+
+fn hex(s: Str) -> Bytes
+    bytes.from_hex(s) ?? bytes.zeros(0)
+
+// What a decode of `src` answers, as a short string: the kind, or the
+// refusal's own message.
+fn outcome(src: Bytes) -> Str
+    match cborfmt.decode(src)
+        Ok(v)  => cborfmt.type_name(v)
+        Err(e) => e.message()
+
+// `src` decoded and written again in `mode`, as hex — or the refusal.
+fn re_enc(src: Bytes, mode: CborMode) -> Str
+    match cborfmt.decode(src)
+        Ok(v)  => bytes.to_hex(cborfmt.encode(v, mode))
+        Err(e) => e.message()
+
+// `v` written again in the shortest mode, as hex.
+fn value_hex(v: CborValue) -> Str
+    bytes.to_hex(cborfmt.encode(v, CborShortest))
+
+// Every finished value, as hex, one to a line.
+fn values_hex(vs: [CborValue]) -> Str
+    var out = ""
+    for v in vs
+        out = out + value_hex(v) + " "
+    out
+
+// One chunk fed, whatever it finished; a refusal answers nothing, which
+// makes the caller's assertion fail loudly.
+fn fed(d: CborDecoder, chunk: Bytes) -> CborFeed
+    match cbordec.feed(d, chunk)
+        Ok(f)  => f
+        Err(_) => CborFeed { decoder: d, values: [] }
+
+// Whether a refusal's message carries `part`.
+fn says(e: CborError, part: Str) -> Bool
+    let m = e.message()
+    str.starts_with(m, "cbor: ") and str.contains(m, part)
+
+// The refusal of a result that is one — a fixture that decodes cleanly
+// shows up as a failed assertion.
+fn cbor_error<T>(r: Result<T, CborError>) -> CborError
+    match r
+        Ok(_)  => CborTruncated(0 - 1, 0)
+        Err(e) => e
+
+// A `CborError`-carrying result as a string: `ok` or the message.
+fn cbor_fault<T>(r: Result<T, CborError>) -> Str
+    match r
+        Ok(_)  => "ok"
+        Err(e) => e.message()
+
+// The value a document holds, or `CborNull` when it does not decode.
+fn decoded(src: Bytes) -> CborValue
+    match cborfmt.decode(src)
+        Ok(v)  => v
+        Err(_) => CborNull
+
+// A `DeserializeError`-carrying result as a string.
+fn str_of<T>(r: Result<T, DeserializeError>) -> Str
+    match r
+        Ok(_)  => "ok"
+        Err(e) => e.path + ": " + e.reason
+
+// `v` written as CBOR, or nothing when the walk refuses — a refusal
+// shows up as a failed assertion rather than as a silent absence.
+fn as_cbor<T: Serialize>(v: T) -> Bytes
+    match cborserde.to_bytes(v)
+        Ok(b)  => b
+        Err(_) => bytes.zeros(0)
+
+// ── The head arithmetic ─────────────────────────────────────────────
+
+@test
+fn test_the_head_arithmetic_answers_its_edges()
+    test.assert_eq(cborhead.head_len(23), 1)
+    test.assert_eq(cborhead.head_len(24), 2)
+    test.assert_eq(cborhead.head_len(255), 2)
+    test.assert_eq(cborhead.head_len(256), 3)
+    test.assert_eq(cborhead.head_len(65535), 3)
+    test.assert_eq(cborhead.head_len(65536), 5)
+    test.assert_eq(cborhead.head_len(4294967295), 5)
+    // A value at or above 2^32 and a negative one both wear the eight
+    // byte argument; the negative case has no encoding of its own and
+    // `emit_head` is what refuses it.
+    test.assert_eq(cborhead.head_len(4294967296), 9)
+    test.assert_eq(cborhead.head_len(0 - 1), 9)
+    test.assert_eq(cborhead.initial_byte(0, 4294967296), 0x1B)
+    test.assert_eq(cborhead.initial_byte(0, 0 - 1), 0x1B)
+    test.assert_eq(cborhead.initial_byte(0, 4294967295), 0x1A)
+    test.assert_eq(cborhead.initial_byte(0, 65535), 0x19)
+    test.assert_eq(cborhead.initial_byte(0, 255), 0x18)
+    test.assert_eq(cborhead.initial_byte(cborhead.major_map(), 0), 0xA0)
+    test.assert_eq(cborhead.negative_value(0), 0 - 1)
+    test.assert_eq(cborhead.negative_arg(0 - 1), 0)
+    test.assert_eq(cborhead.break_byte(), 0xFF)
+
+@test
+fn test_a_head_writer_refuses_what_it_cannot_write()
+    test.assert(not cborhead.emit_head(9, 0).ok)
+    test.assert(not cborhead.emit_head(0 - 1, 0).ok)
+    test.assert(not cborhead.emit_head(0, 0 - 1).ok)
+    test.assert(cborhead.emit_head(0, 0).ok)
+    test.assert(cborhead.emit_indefinite(2).ok)
+    test.assert(cborhead.emit_indefinite(5).ok)
+    test.assert(not cborhead.emit_indefinite(6).ok)
+    test.assert(not cborhead.emit_indefinite(1).ok)
+    test.assert_eq(cborhead.emit_head(cborhead.major_unsigned(), 0).len, 1)
+    test.assert_eq(cborhead.emit_head(cborhead.major_unsigned(), 4294967296).len, 9)
+    test.assert_eq(cborhead.emit_indefinite(cborhead.major_bytes()).len, 1)
+    test.assert_eq(cborhead.emit_break().len, 1)
+    test.assert(cborhead.emit_break().ok)
+
+@test
+fn test_a_scan_wants_the_bytes_its_first_head_announced()
+    test.assert_eq(cborhead.scan_need(cborhead.scan()), 1)
+    test.assert_eq(cborhead.scan_need(cborhead.push(cborhead.scan(), 0x18 as u8)), 1)
+    test.assert_eq(cborhead.scan_need(cborhead.push(cborhead.scan(), 0x19 as u8)), 2)
+    test.assert_eq(cborhead.scan_need(cborhead.push(cborhead.scan(), 0x1A as u8)), 4)
+    test.assert_eq(cborhead.scan_need(cborhead.push(cborhead.scan(), 0x1B as u8)), 8)
+    test.assert_eq(cborhead.push(cborhead.scan(), 0x18 as u8).want, 2)
+    test.assert_eq(cborhead.push(cborhead.scan(), 0x1A as u8).want, 5)
+    test.assert_eq(cborhead.push(cborhead.scan(), 0x1B as u8).want, 9)
+    test.assert_eq(cborhead.push(cborhead.scan(), 0x1A as u8).done, false)
+    test.assert_eq(cborhead.push(cborhead.scan(), 0xFF as u8).indefinite, true)
+    // A byte fed to a finished scan is ignored: a `@value` function has
+    // nowhere to put a refusal and a caller that checks `done` cannot
+    // reach the case.
+    let done = cborhead.push(cborhead.scan(), 0x01 as u8)
+    let again = cborhead.push(done, 0x09 as u8)
+    test.assert_eq(again.arg, 1)
+    test.assert_eq(again.done, true)
+    // And a real document's heads scan back, one byte at a time: the
+    // array head, the three-byte tag head, and the null.
+    let doc = hex("82d9d9f7f6")
+    var s = cborhead.scan()
+    var finished = 0
+    for i in 0..bytes.len(doc)
+        s = cborhead.push(s, bytes.byte_at(doc, i) ?? 0 as u8)
+        if s.done
+            finished = finished + 1
+            s = cborhead.scan()
+    test.assert_eq(finished, 3)
+
+// ── Every refusal, every kind, every accessor ───────────────────────
+
+@test
+fn test_every_refusal_carries_its_own_message()
+    test.assert_eq(CborTruncated(3, 4).message(),
+                   "cbor: the value at offset 3 needs 4 more bytes")
+    test.assert_eq(CborReservedInfo(2, 28).message(),
+                   "cbor: additional information 28 at offset 2 is reserved")
+    test.assert_eq(CborBadIndefinite(1, 0).message(),
+                   "cbor: major type 0 at offset 1 has no indefinite form")
+    test.assert_eq(CborUnexpectedBreak(5).message(),
+                   "cbor: the break byte at offset 5 closes nothing")
+    test.assert_eq(CborBadChunk(6, 2).message(),
+                   "cbor: a chunk of major type 2 at offset 6 does not match its string")
+    test.assert_eq(CborBadUtf8(7).message(), "cbor: the text at offset 7 is not UTF-8")
+    test.assert_eq(CborDepthExceeded(8, 64).message(),
+                   "cbor: the value at offset 8 nests past the limit of 64")
+    test.assert_eq(CborTrailingBytes(9, 3).message(),
+                   "cbor: 3 bytes follow the value, from offset 9")
+    test.assert_eq(CborBadTagPayload(10, 2).message(),
+                   "cbor: the payload of tag 2 at offset 10 is the wrong shape")
+    test.assert_eq(CborBufferTooSmall(9, 4).message(),
+                   "cbor: 9 bytes are needed and the destination holds 4")
+    // The wrong-kind report leaves the offset out when an accessor has
+    // none to name, and names it when a decode does.
+    test.assert_eq(CborWrongType(-1, "integer", "text").message(),
+                   "cbor: wanted integer and found text")
+    test.assert_eq(CborWrongType(11, "integer", "text").message(),
+                   "cbor: wanted integer and found text at offset 11")
+
+@test
+fn test_type_name_spells_every_kind()
+    test.assert_eq(cborfmt.type_name(CborUnsigned(0)), "unsigned")
+    test.assert_eq(cborfmt.type_name(CborNegative(0 - 1)), "negative")
+    test.assert_eq(cborfmt.type_name(CborWideInt(0, 0 - 1)), "wide")
+    test.assert_eq(cborfmt.type_name(CborBytes(hex("00"))), "bytes")
+    test.assert_eq(cborfmt.type_name(CborText("t")), "text")
+    test.assert_eq(cborfmt.type_name(CborArray([])), "array")
+    test.assert_eq(cborfmt.type_name(CborMap([])), "map")
+    test.assert_eq(cborfmt.type_name(CborTagged(0, CborNull)), "tag")
+    test.assert_eq(cborfmt.type_name(CborBool(true)), "bool")
+    test.assert_eq(cborfmt.type_name(CborNull), "null")
+    test.assert_eq(cborfmt.type_name(CborUndefined), "undefined")
+    test.assert_eq(cborfmt.type_name(CborSimple(3)), "simple")
+    test.assert_eq(cborfmt.type_name(CborFloat16(1.0)), "float16")
+    test.assert_eq(cborfmt.type_name(CborFloat32(1.0)), "float32")
+    test.assert_eq(cborfmt.type_name(CborFloat64(1.0)), "float64")
+
+@test
+fn test_every_accessor_refuses_the_wrong_kind()
+    match cborfmt.as_int(CborText("t"))
+        Ok(_)  => test.fail("a text is not an integer")
+        Err(e) => test.assert(says(e, "wanted integer and found text"))
+    match cborfmt.as_int(CborWideInt(0, 0))
+        Ok(_)  => test.fail("a wide integer does not fit an Int answer")
+        Err(e) => test.assert(says(e, "found wide"))
+    match cborfmt.as_int(CborNegative(0 - 7))
+        Ok(n)  => test.assert_eq(n, 0 - 7)
+        Err(e) => test.fail(e.message())
+    match cborfmt.as_bool(CborNull)
+        Ok(_)  => test.fail("null is not a bool")
+        Err(e) => test.assert(says(e, "wanted bool"))
+    match cborfmt.as_float(CborFloat32(0.5))
+        Ok(f)  => test.assert_eq(f, 0.5)
+        Err(e) => test.fail(e.message())
+    match cborfmt.as_float(CborFloat64(0.5))
+        Ok(f)  => test.assert_eq(f, 0.5)
+        Err(e) => test.fail(e.message())
+    match cborfmt.as_float(CborNull)
+        Ok(_)  => test.fail("null is not a float")
+        Err(e) => test.assert(says(e, "wanted float"))
+    match cborfmt.as_text(CborBytes(hex("61")))
+        Ok(_)  => test.fail("a byte string is not text")
+        Err(e) => test.assert(says(e, "wanted text"))
+    match cborfmt.as_text(CborText("t"))
+        Ok(t)  => test.assert_eq(t, "t")
+        Err(e) => test.fail(e.message())
+    match cborfmt.as_bytes(CborText("t"))
+        Ok(_)  => test.fail("text is not a byte string")
+        Err(e) => test.assert(says(e, "wanted bytes"))
+    match cborfmt.as_bytes(CborBytes(hex("0102")))
+        Ok(b)  => test.assert_eq(bytes.to_hex(b), "0102")
+        Err(e) => test.fail(e.message())
+    match cborfmt.as_array(CborNull)
+        Ok(_)  => test.fail("null is not an array")
+        Err(e) => test.assert(says(e, "wanted array"))
+    match cborfmt.as_array(CborArray([CborUnsigned(1)]))
+        Ok(xs) => test.assert_eq(list.len(xs), 1)
+        Err(e) => test.fail(e.message())
+    match cborfmt.as_map(CborNull)
+        Ok(_)  => test.fail("null is not a map")
+        Err(e) => test.assert(says(e, "wanted map"))
+    match cborfmt.as_map(CborMap([]))
+        Ok(es) => test.assert_eq(list.len(es), 0)
+        Err(e) => test.fail(e.message())
+    // `get` looks text keys up and reports a miss as a wrong kind whose
+    // `want` is the key itself; a non-text key is never a match.
+    let doc = CborMap([CborPair { key: CborUnsigned(1), value: CborUnsigned(2) },
+                       CborPair { key: CborText("a"), value: CborUnsigned(3) }])
+    match cborfmt.get(doc, "a")
+        Ok(v)  => test.assert_eq(value_hex(v), "03")
+        Err(e) => test.fail(e.message())
+    match cborfmt.get(doc, "b")
+        Ok(_)  => test.fail("the map carries no key b")
+        Err(e) => test.assert(says(e, "wanted b and found absent"))
+    match cborfmt.get(CborNull, "a")
+        Ok(_)  => test.fail("null is not a map")
+        Err(e) => test.assert(says(e, "wanted map"))
+    test.assert_eq(cborfmt.type_name(cborfmt.untagged(CborUnsigned(1))), "unsigned")
+    test.assert_eq(cborfmt.type_name(cborfmt.untagged(
+        CborTagged(cborfmt.tag_self_described(),
+                   CborTagged(cborfmt.tag_datetime_text(), CborText("x"))))),
+                   "text")
+
+@test
+fn test_the_datetime_tag_reads_both_forms_and_refuses_the_rest()
+    test.assert_eq(cborfmt.tag_datetime_text(), 0)
+    test.assert_eq(cborfmt.tag_datetime_epoch(), 1)
+    test.assert_eq(cborfmt.type_name(cborfmt.datetime_text_value("1970-01-01T00:00:00Z")), "tag")
+    match cborfmt.datetime_of(cborfmt.datetime_text_value("1970-01-01T00:00:00Z"))
+        Ok(CborDateText(t))     => test.assert_eq(t, "1970-01-01T00:00:00Z")
+        Ok(CborDateEpoch(_, _)) => test.fail("the text form is tag 0")
+        Err(e)                  => test.fail(e.message())
+    match cborfmt.datetime_of(cborfmt.datetime_epoch_value(0 - 3))
+        Ok(CborDateEpoch(s, f)) =>
+            test.assert_eq(s, 0 - 3)
+            test.assert_eq(f, 0.0)
+        Ok(CborDateText(_))     => test.fail("the integer form is tag 1")
+        Err(e)                  => test.fail(e.message())
+    // A tag 1 payload may be any of the three float widths; the whole
+    // part and the fraction are told apart so an integer form does not
+    // have to be read back through a double.
+    match cborfmt.datetime_of(decoded(hex("c1f93800")))
+        Ok(CborDateEpoch(s, f)) =>
+            test.assert_eq(s, 0)
+            test.assert(f == 0.5)
+        _                       => test.fail("a half-precision tag 1")
+    match cborfmt.datetime_of(decoded(hex("c1fa3f000000")))
+        Ok(CborDateEpoch(s, f)) =>
+            test.assert_eq(s, 0)
+            test.assert(f == 0.5)
+        _                       => test.fail("a single-precision tag 1")
+    match cborfmt.datetime_of(decoded(hex("c1fb3fe0000000000000")))
+        Ok(CborDateEpoch(s, f)) =>
+            test.assert_eq(s, 0)
+            test.assert(f == 0.5)
+        _                       => test.fail("a double-precision tag 1")
+    match cborfmt.datetime_of(decoded(hex("c120")))
+        Ok(CborDateEpoch(s, f)) =>
+            test.assert_eq(s, 0 - 1)
+            test.assert_eq(f, 0.0)
+        _                       => test.fail("a negative integer tag 1")
+    test.assert(says(cbor_error(cborfmt.datetime_of(decoded(hex("c16178")))), "wrong shape"))
+    test.assert(says(cbor_error(cborfmt.datetime_of(decoded(hex("c0f6")))), "wrong shape"))
+    test.assert(says(cbor_error(cborfmt.datetime_of(decoded(hex("c500")))), "tag 0 or tag 1"))
+    test.assert(says(cbor_error(cborfmt.datetime_of(CborNull)), "tag 0 or tag 1"))
+
+@test
+fn test_the_bignum_tags_read_their_magnitudes()
+    test.assert_eq(cborfmt.tag_bignum_unsigned(), 2)
+    test.assert_eq(cborfmt.tag_bignum_negative(), 3)
+    let positive = cborfmt.bignum_value(CborBigNum { magnitude: hex("010203"), negative: false })
+    test.assert_eq(cborfmt.type_name(positive), "tag")
+    match cborfmt.bignum_of(positive)
+        Ok(n)  =>
+            test.assert_eq(bytes.to_hex(n.magnitude), "010203")
+            test.assert_eq(n.negative, false)
+        Err(e) => test.fail(e.message())
+    let negative = cborfmt.bignum_value(CborBigNum { magnitude: hex("02"), negative: true })
+    match cborfmt.bignum_of(negative)
+        Ok(n)  =>
+            test.assert_eq(bytes.to_hex(n.magnitude), "02")
+            test.assert_eq(n.negative, true)
+        Err(e) => test.fail(e.message())
+    // An eight-byte magnitude whose top bit is set does not fit a signed
+    // `Int`, which is exactly the value the tag exists for.
+    match cborfmt.bignum_of(decoded(hex("c248ffffffffffffffff")))
+        Ok(n)  => test.assert_eq(bytes.len(n.magnitude), 8)
+        Err(e) => test.fail(e.message())
+    match cborfmt.bignum_of(decoded(hex("c249ffffffffffffffffff")))
+        Ok(n)  => test.assert_eq(bytes.len(n.magnitude), 9)
+        Err(e) => test.fail(e.message())
+    // A tag 2 around something that is not a byte string, and a tag that
+    // is neither 2 nor 3.
+    test.assert(says(cbor_error(cborfmt.bignum_of(decoded(hex("c201")))), "wrong shape"))
+    test.assert(says(cbor_error(cborfmt.bignum_of(decoded(hex("c500")))), "tag 2 or tag 3"))
+    test.assert(says(cbor_error(cborfmt.bignum_of(CborNull)), "tag 2 or tag 3"))
+
+@test
+fn test_the_decimal_fraction_reads_an_exponent_and_a_mantissa()
+    test.assert_eq(cborfmt.tag_decimal_fraction(), 4)
+    // The mantissa is a bignum because the tag permits one there, and a
+    // mantissa that fits an `Int` arrives the same way, so a caller
+    // writes one reader rather than two.
+    match cborfmt.decimal_of(decoded(hex("c48221196ab3")))
+        Ok(d)  =>
+            test.assert_eq(d.exponent, 0 - 2)
+            test.assert_eq(bytes.to_hex(d.mantissa.magnitude), "6ab3")
+            test.assert_eq(d.mantissa.negative, false)
+        Err(e) => test.fail(e.message())
+    match cborfmt.decimal_of(decoded(hex("c4822001")))
+        Ok(d)  =>
+            test.assert_eq(d.exponent, 0 - 1)
+            test.assert_eq(bytes.to_hex(d.mantissa.magnitude), "01")
+            test.assert_eq(d.mantissa.negative, false)
+        Err(e) => test.fail(e.message())
+    // A negative mantissa arrives as a major-1 integer, which is the
+    // other integer form a reader folds into a magnitude.
+    match cborfmt.decimal_of(decoded(hex("c4822021")))
+        Ok(d)  =>
+            test.assert_eq(d.exponent, 0 - 1)
+            test.assert_eq(bytes.to_hex(d.mantissa.magnitude), "01")
+            test.assert_eq(d.mantissa.negative, true)
+        Err(e) => test.fail(e.message())
+    // A tag 2 or tag 3 byte string in the mantissa slot, and a
+    // `CborWideInt` there.
+    match cborfmt.decimal_of(decoded(hex("c48200c243010203")))
+        Ok(d)  => test.assert_eq(bytes.len(d.mantissa.magnitude), 3)
+        Err(e) => test.fail(e.message())
+    match cborfmt.decimal_of(decoded(hex("c48201c34102")))
+        Ok(d)  => test.assert_eq(d.mantissa.negative, true)
+        Err(e) => test.fail(e.message())
+    match cborfmt.decimal_of(decoded(hex("c482041bffffffffffffffff")))
+        Ok(d)  =>
+            test.assert_eq(bytes.len(d.mantissa.magnitude), 8)
+            test.assert_eq(d.mantissa.negative, false)
+        Err(e) => test.fail(e.message())
+    match cborfmt.decimal_of(decoded(hex("c482053bffffffffffffffff")))
+        Ok(d)  =>
+            test.assert_eq(bytes.len(d.mantissa.magnitude), 8)
+            test.assert_eq(d.mantissa.negative, true)
+        Err(e) => test.fail(e.message())
+    // Every way the payload can be the wrong shape.
+    test.assert(says(cbor_error(cborfmt.decimal_of(decoded(hex("c482617801")))), "wrong shape"))
+    test.assert(says(cbor_error(cborfmt.decimal_of(decoded(hex("c482006178")))), "wrong shape"))
+    test.assert(says(cbor_error(cborfmt.decimal_of(decoded(hex("c483000102")))), "wrong shape"))
+    test.assert(says(cbor_error(cborfmt.decimal_of(decoded(hex("c4f6")))), "wrong shape"))
+    test.assert(says(cbor_error(cborfmt.decimal_of(decoded(hex("c48202c26178")))), "wrong shape"))
+    test.assert(says(cbor_error(cborfmt.decimal_of(decoded(hex("c48203c500")))), "wrong shape"))
+    test.assert(says(cbor_error(cborfmt.decimal_of(decoded(hex("c500")))), "tag 4"))
+    test.assert(says(cbor_error(cborfmt.decimal_of(CborNull)), "tag 4"))
+
+@test
+fn test_the_decimal_writer_picks_the_shorter_form()
+    // An integer is the shorter form of a magnitude that fits one, and
+    // the bignum tag is the form for one that does not.
+    test.assert_eq(value_hex(cborfmt.decimal_value(CborDecimal {
+        exponent: 0 - 2, mantissa: CborBigNum { magnitude: hex("6ab3"), negative: false } })),
+        "c48221196ab3")
+    test.assert_eq(value_hex(cborfmt.decimal_value(CborDecimal {
+        exponent: 0 - 1, mantissa: CborBigNum { magnitude: hex("02"), negative: true } })),
+        "c4822022")
+    test.assert_eq(value_hex(cborfmt.decimal_value(CborDecimal {
+        exponent: 0, mantissa: CborBigNum { magnitude: hex("ffffffffffffffff"), negative: false } })),
+        "c48200c248ffffffffffffffff")
+    test.assert_eq(value_hex(cborfmt.decimal_value(CborDecimal {
+        exponent: 0, mantissa: CborBigNum { magnitude: hex("00ffffffffffffffff"), negative: true } })),
+        "c48200c34900ffffffffffffffff")
+    test.assert_eq(value_hex(cborfmt.decimal_value(CborDecimal {
+        exponent: 0, mantissa: CborBigNum { magnitude: hex("00"), negative: false } })),
+        "c4820000")
+
+// ── The floats ──────────────────────────────────────────────────────
+
+@test
+fn test_the_float_widths_write_at_the_width_they_declare()
+    // The width is on the wire, so the shortest mode writes the width
+    // the value declares.
+    test.assert_eq(re_enc(hex("f93e00"), CborShortest), "f93e00")
+    test.assert_eq(re_enc(hex("fa3f000000"), CborShortest), "fa3f000000")
+    test.assert_eq(re_enc(hex("fb3fe0000000000000"), CborShortest), "fb3fe0000000000000")
+    // An unsigned half is `f9` and two bytes; a subnormal one keeps its
+    // pattern; a value past the half's range rounds to infinity.
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborFloat16(1.0), CborShortest)), "f93c00")
+    test.assert_eq(re_enc(hex("f90001"), CborShortest), "f90001")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborFloat16(1.0e30), CborShortest)), "f97c00")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborFloat16(1.0e30), CborCanonical)),
+                   "fb46293e5939a08cea")
+    test.assert_eq(re_enc(hex("fa00000001"), CborShortest), "fa00000001")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborFloat32(1.0e300), CborShortest)), "fa7f800000")
+
+@test
+fn test_the_infinities_and_nans_keep_their_own_widths()
+    // `f97c00` is infinity and `f97e00` the canonical NaN: the
+    // deterministic mode takes the narrowest width, which for these is
+    // the half, and never a narrower one.
+    test.assert_eq(re_enc(hex("f97c00"), CborShortest), "f97c00")
+    test.assert_eq(re_enc(hex("f97c00"), CborCanonical), "f97c00")
+    test.assert_eq(re_enc(hex("f97e00"), CborShortest), "f97e00")
+    test.assert_eq(re_enc(hex("f97e00"), CborCanonical), "f97e00")
+    test.assert_eq(re_enc(hex("fa7f800000"), CborShortest), "fa7f800000")
+    test.assert_eq(re_enc(hex("fa7f800000"), CborCanonical), "f97c00")
+    test.assert_eq(re_enc(hex("fa7fc00000"), CborShortest), "fa7fc00000")
+    test.assert_eq(re_enc(hex("fa7fc00000"), CborCanonical), "f97e00")
+    test.assert_eq(re_enc(hex("fb7ff0000000000000"), CborShortest), "fb7ff0000000000000")
+    test.assert_eq(re_enc(hex("fb7ff0000000000000"), CborCanonical), "f97c00")
+    test.assert_eq(re_enc(hex("fb7ff8000000000000"), CborShortest), "fb7ff8000000000000")
+    test.assert_eq(re_enc(hex("fb7ff8000000000000"), CborCanonical), "f97e00")
+
+@test
+fn test_a_float_that_does_not_survive_a_narrower_width_stays_wide()
+    // Rounding to the nearest half would change the value, so the
+    // deterministic mode keeps the width that reads back the same — and
+    // a subnormal below the half's range keeps its own bytes.
+    test.assert_eq(re_enc(hex("f90001"), CborCanonical), "f90001")
+    test.assert_eq(re_enc(hex("fa00000001"), CborCanonical), "fa00000001")
+    test.assert_eq(re_enc(hex("fa4b800000"), CborCanonical), "fa4b800000")
+    test.assert_eq(re_enc(hex("fb0000000000000001"), CborCanonical), "fb0000000000000001")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborFloat64(1.0e-9), CborCanonical)),
+                   "fb3e112e0be826d695")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborFloat64(1.0e-60), CborCanonical)),
+                   "fb3379b604aaaca626")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborFloat64(1.0e-40), CborCanonical)),
+                   "fb37a16c262777579c")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborFloat64(0.25), CborCanonical)), "f93400")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborFloat64(16777216.0), CborCanonical)),
+                   "fa4b800000")
+
+@test
+fn test_encoded_len_says_what_the_writer_does()
+    test.assert_eq(cborfmt.encoded_len(CborFloat64(1.0e-9), CborCanonical), 9)
+    test.assert_eq(cborfmt.encoded_len(CborFloat64(1.0e-9), CborShortest), 9)
+    test.assert_eq(cborfmt.encoded_len(CborFloat16(0.5), CborShortest), 3)
+    test.assert_eq(cborfmt.encoded_len(CborFloat16(1.0e30), CborCanonical), 9)
+    test.assert_eq(cborfmt.encoded_len(CborFloat64(0.25), CborCanonical), 3)
+    test.assert_eq(cborfmt.encoded_len(CborFloat64(2.0e-308), CborCanonical), 9)
+    test.assert_eq(cborfmt.encoded_len(CborUnsigned(1), CborCanonical), 1)
+    test.assert_eq(cborfmt.encoded_len(CborText("abc"), CborShortest), 4)
+    test.assert_eq(cborfmt.encoded_len(CborArray([CborUnsigned(1), CborUnsigned(2)]),
+                                       CborShortest),
+                                       3)
+    test.assert_eq(cborfmt.encoded_len(CborTagged(0, CborUnsigned(1)), CborShortest), 2)
+    test.assert_eq(cborfmt.encoded_len(CborSimple(24), CborShortest), 2)
+    test.assert_eq(cborfmt.encoded_len(CborBool(true), CborShortest), 1)
+    test.assert_eq(cborfmt.encoded_len(CborNull, CborShortest), 1)
+    test.assert_eq(cborfmt.encoded_len(CborUndefined, CborShortest), 1)
+
+// ── The writer's own paths ──────────────────────────────────────────
+
+@test
+fn test_the_initial_byte_of_every_kind()
+    test.assert_eq(cborfmt.initial_byte(CborUnsigned(1)), 0x01)
+    test.assert_eq(cborfmt.initial_byte(CborNegative(0 - 1)), 0x20)
+    test.assert_eq(cborfmt.initial_byte(CborWideInt(0, 0)), 0x1B)
+    test.assert_eq(cborfmt.initial_byte(CborBytes(hex("0102"))), 0x42)
+    test.assert_eq(cborfmt.initial_byte(CborText("abc")), 0x63)
+    test.assert_eq(cborfmt.initial_byte(CborArray([CborNull])), 0x81)
+    test.assert_eq(cborfmt.initial_byte(CborMap([])), 0xA0)
+    test.assert_eq(cborfmt.initial_byte(CborTagged(cborfmt.tag_self_described(), CborNull)), 0xD9)
+    test.assert_eq(cborfmt.initial_byte(CborBool(true)), 0xF5)
+    test.assert_eq(cborfmt.initial_byte(CborBool(false)), 0xF4)
+    test.assert_eq(cborfmt.initial_byte(CborNull), 0xF6)
+    test.assert_eq(cborfmt.initial_byte(CborUndefined), 0xF7)
+    test.assert_eq(cborfmt.initial_byte(CborSimple(3)), 0xE3)
+    test.assert_eq(cborfmt.initial_byte(CborSimple(24)), 0xF8)
+    test.assert_eq(cborfmt.initial_byte(CborFloat16(1.0)), 0xF9)
+    test.assert_eq(cborfmt.initial_byte(CborFloat32(1.0)), 0xFA)
+    test.assert_eq(cborfmt.initial_byte(CborFloat64(1.0)), 0xFB)
+
+@test
+fn test_a_wide_integer_is_written_at_its_own_width()
+    // A `CborWideInt` is major type 0 or 1 with an eight-byte argument
+    // whatever its pattern is, so the three answers agree: nine bytes
+    // for `encoded_len`, `0x1b` or `0x3b` for `initial_byte`, and eight
+    // argument bytes on the wire.
+    test.assert_eq(cborfmt.encoded_len(CborWideInt(0, 0), CborShortest), 9)
+    test.assert_eq(cborfmt.encoded_len(CborWideInt(0, 0), CborCanonical), 9)
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborWideInt(0, 0), CborShortest)),
+                   "1b0000000000000000")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborWideInt(1, 0 - 1), CborShortest)),
+                   "3bffffffffffffffff")
+    test.assert_eq(re_enc(hex("1bffffffffffffffff"), CborCanonical), "1bffffffffffffffff")
+    test.assert_eq(re_enc(hex("3bffffffffffffffff"), CborCanonical), "3bffffffffffffffff")
+    test.assert_eq(outcome(hex("1bffffffffffffffff")), "wide")
+    test.assert_eq(outcome(hex("3bffffffffffffffff")), "wide")
+    // And into a buffer the caller owns.
+    var dst = bytes.cursor_le(bytes.zeros(9))
+    match cborfmt.encode_into(CborWideInt(0, 0), CborShortest, dst)
+        Ok(n)  =>
+            test.assert_eq(n, 9)
+            test.assert_eq(bytes.to_hex(bytes.slice(dst.finish(), 0, n)), "1b0000000000000000")
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_simple_value_writes_in_its_five_bits_or_its_one_byte_form()
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborSimple(5), CborShortest)), "e5")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborSimple(23), CborShortest)), "f7")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborSimple(24), CborShortest)), "f818")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborSimple(200), CborShortest)), "f8c8")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborBool(false), CborShortest)), "f4")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborBool(true), CborShortest)), "f5")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborNull, CborShortest)), "f6")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(CborUndefined, CborShortest)), "f7")
+    test.assert_eq(cborfmt.encoded_len(CborSimple(5), CborShortest), 1)
+    test.assert_eq(cborfmt.encoded_len(CborSimple(24), CborShortest), 2)
+    test.assert_eq(cborfmt.encoded_len(CborNegative(0 - 1), CborShortest), 1)
+
+@test
+fn test_canonical_order_keeps_duplicate_keys_and_equal_keys()
+    // The insertion steps over equal keys rather than around them, so a
+    // map written with duplicate keys keeps the order it was given —
+    // RFC 8949 § 5.6 calls such a document invalid while leaving both
+    // keys on the wire, and a validator has to see both.
+    let dup = CborMap([CborPair { key: CborText("a"), value: CborUnsigned(1) },
+                       CborPair { key: CborText("a"), value: CborUnsigned(2) }])
+    test.assert_eq(bytes.to_hex(cborfmt.encode(dup, CborCanonical)), "a2616101616102")
+    // A key that is a prefix of another sorts first: "a" encodes to
+    // 6161 and "ab" to 626162, and the two heads differ at the first
+    // byte.
+    let pair = CborMap([CborPair { key: CborText("ab"), value: CborUnsigned(2) },
+                        CborPair { key: CborText("a"), value: CborUnsigned(1) }])
+    test.assert_eq(bytes.to_hex(cborfmt.encode(pair, CborCanonical)), "a261610162616202")
+    // Keys of different major types sort by their own encoded bytes, so
+    // a one-byte integer sorts before a text of one byte.
+    let mixed = CborMap([CborPair { key: CborText("b"), value: CborUnsigned(2) },
+                         CborPair { key: CborUnsigned(9), value: CborUnsigned(1) }])
+    test.assert_eq(bytes.to_hex(cborfmt.encode(mixed, CborCanonical)), "a20901616202")
+
+@test
+fn test_is_canonical_answers_the_decoders_own_refusal()
+    test.assert_eq(cbor_fault(cborfmt.is_canonical(hex("ff"))),
+                   "cbor: the break byte at offset 0 closes nothing")
+    test.assert_eq(cbor_fault(cborfmt.is_canonical(hex(""))),
+                   "cbor: the value at offset 0 needs 1 more bytes")
+    match cborfmt.is_canonical(hex("f97c00"))
+        Ok(yes) => test.assert_eq(yes, true)
+        Err(e)  => test.fail(e.message())
+    match cborfmt.is_canonical(hex("fa7f800000"))
+        Ok(yes) => test.assert_eq(yes, false)
+        Err(e)  => test.fail(e.message())
+
+// ── The reader's edges ──────────────────────────────────────────────
+
+@test
+fn test_the_utf8_matrix()
+    // Every width, at the ends of its range, and every way a sequence
+    // can break: a bad continuation byte, an overlong form, a
+    // surrogate, and a code point past U+10FFFF.
+    test.assert_eq(outcome(hex("62c3a9")), "text")
+    test.assert_eq(outcome(hex("63e282ac")), "text")
+    test.assert_eq(outcome(hex("64f09f9880")), "text")
+    test.assert_eq(outcome(hex("63e0a080")), "text")
+    test.assert_eq(outcome(hex("64f0908080")), "text")
+    test.assert_eq(outcome(hex("63ed9fbf")), "text")
+    test.assert_eq(outcome(hex("64f48fbfbf")), "text")
+    test.assert(says(cbor_error(cborfmt.decode(hex("61ff"))), "not UTF-8"))
+    test.assert(says(cbor_error(cborfmt.decode(hex("62c328"))), "not UTF-8"))
+    test.assert(says(cbor_error(cborfmt.decode(hex("63e09f80"))), "not UTF-8"))
+    test.assert(says(cbor_error(cborfmt.decode(hex("63e28228"))), "not UTF-8"))
+    test.assert(says(cbor_error(cborfmt.decode(hex("63eda080"))), "not UTF-8"))
+    test.assert(says(cbor_error(cborfmt.decode(hex("64f4908080"))), "not UTF-8"))
+    test.assert(says(cbor_error(cborfmt.decode(hex("62e282"))), "not UTF-8"))
+    test.assert_eq(outcome(hex("61")), "cbor: the value at offset 0 needs 1 more bytes")
+    // A byte string carries the same bytes and is not text.
+    test.assert_eq(outcome(hex("43e28228")), "bytes")
+
+@test
+fn test_a_length_that_cannot_be_met_saturates()
+    // A length at or above 2^63 arrives negative, and no count of bytes
+    // completes such a value, so the shortfall saturates rather than
+    // turning into a small positive number.
+    test.assert_eq(outcome(hex("5bffffffffffffffff")),
+                   "cbor: the value at offset 0 needs 9223372036854775807 more bytes")
+    test.assert_eq(outcome(hex("7bffffffffffffffff")),
+                   "cbor: the value at offset 0 needs 9223372036854775807 more bytes")
+    test.assert_eq(outcome(hex("9bffffffffffffffff")),
+                   "cbor: the value at offset 0 needs 9223372036854775807 more bytes")
+    test.assert_eq(outcome(hex("bbffffffffffffffff")),
+                   "cbor: the value at offset 0 needs 9223372036854775807 more bytes")
+    test.assert_eq(outcome(hex("5a0000001061")), "cbor: the value at offset 0 needs 15 more bytes")
+    test.assert_eq(outcome(hex("7a0000001061")), "cbor: the value at offset 0 needs 15 more bytes")
+    test.assert_eq(outcome(hex("9a0000001001")), "cbor: the value at offset 0 needs 15 more bytes")
+    test.assert_eq(outcome(hex("ba0000001001")), "cbor: the value at offset 0 needs 15 more bytes")
+    test.assert_eq(outcome(hex("")), "cbor: the value at offset 0 needs 1 more bytes")
+    // A map head announcing more pairs than the bytes hold.
+    test.assert_eq(outcome(hex("a2010203")), "cbor: the value at offset 4 needs 1 more bytes")
+
+@test
+fn test_the_reader_reads_tags_simple_values_and_the_wide_heads()
+    test.assert_eq(outcome(hex("c001")), "tag")
+    test.assert_eq(outcome(hex("d9d9f7f6")), "tag")
+    test.assert_eq(outcome(hex("1818")), "unsigned")
+    test.assert_eq(outcome(hex("1a000f4240")), "unsigned")
+    test.assert_eq(outcome(hex("39012b")), "negative")
+    test.assert_eq(outcome(hex("3a000f4240")), "negative")
+    test.assert_eq(outcome(hex("e0")), "simple")
+    test.assert_eq(outcome(hex("f818")), "simple")
+    test.assert_eq(outcome(hex("fa3f800000")), "float32")
+    test.assert_eq(outcome(hex("fb3ff0000000000000")), "float64")
+    test.assert_eq(outcome(hex("f97c00")), "float16")
+    test.assert_eq(outcome(hex("f6")), "null")
+    test.assert_eq(outcome(hex("f7")), "undefined")
+    test.assert_eq(outcome(hex("4400010203")), "bytes")
+
+@test
+fn test_the_reader_accepts_what_the_writer_would_not_produce()
+    // Deterministic encoding is a rule for the WRITER.  A reader has no
+    // business refusing a document for being written the long way, and
+    // the encoder's strictness must not leak into the decoder: each of
+    // these reads as a value, and the canonical answer for it differs
+    // from the bytes that arrived.
+    test.assert_eq(outcome(hex("1817")), "unsigned")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(decoded(hex("1817")),
+                                               CborCanonical)),
+                                               "17")
+    test.assert_eq(outcome(hex("5f426162426364ff")), "bytes")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(decoded(hex("5f426162426364ff")),
+                                               CborCanonical)),
+                                               "4461626364")
+    test.assert_eq(outcome(hex("bf616101616202ff")), "map")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(decoded(hex("bf616101616202ff")),
+                                               CborCanonical)),
+                   "a2616101616202")
+    test.assert_eq(outcome(hex("fb3ff0000000000000")), "float64")
+    test.assert_eq(bytes.to_hex(cborfmt.encode(decoded(hex("fb3ff0000000000000")),
+                                               CborCanonical)),
+                                               "f93c00")
+    // The stream reads the same document and says it saw an indefinite
+    // length rather than refusing it.
+    let streamed = fed(cbordec.decoder(), hex("5f426162426364ff"))
+    test.assert_eq(list.len(streamed.values), 1)
+    test.assert_eq(cbordec.saw_indefinite(streamed.decoder), true)
+
+@test
+fn test_a_break_in_the_middle_of_a_container_is_refused()
+    // A break at the top of a document closes nothing, and inside a
+    // definite-length container it is a value the head did not
+    // announce.
+    test.assert_eq(outcome(hex("ff")), "cbor: the break byte at offset 0 closes nothing")
+    test.assert_eq(outcome(hex("81ff")), "cbor: the break byte at offset 1 closes nothing")
+    test.assert_eq(outcome(hex("a1ff")), "cbor: the break byte at offset 1 closes nothing")
+    test.assert_eq(outcome(hex("a101ff")), "cbor: the break byte at offset 2 closes nothing")
+    test.assert_eq(outcome(hex("c0ff")), "cbor: the break byte at offset 1 closes nothing")
+    test.assert_eq(outcome(hex("a11c")), "cbor: additional information 28 at offset 1 is reserved")
+    test.assert_eq(outcome(hex("a1011c")),
+                   "cbor: additional information 28 at offset 2 is reserved")
+    test.assert_eq(outcome(hex("811c")), "cbor: additional information 28 at offset 1 is reserved")
+    test.assert_eq(outcome(hex("c01f")), "cbor: major type 0 at offset 1 has no indefinite form")
+    test.assert_eq(outcome(hex("1f")), "cbor: major type 0 at offset 0 has no indefinite form")
+
+@test
+fn test_the_indefinite_forms_and_their_refusals()
+    test.assert_eq(outcome(hex("5f426162426364ff")), "bytes")
+    test.assert_eq(outcome(hex("7f61786162ff")), "text")
+    test.assert_eq(outcome(hex("9f0102ff")), "array")
+    test.assert_eq(outcome(hex("bf617801ff")), "map")
+    test.assert_eq(outcome(hex("bf616101616202ff")), "map")
+    test.assert_eq(outcome(hex("9fff")), "array")
+    test.assert_eq(outcome(hex("bfff")), "map")
+    // Every chunk of an indefinite string must carry the string's own
+    // major type, and a nested indefinite head is not a chunk.
+    test.assert_eq(outcome(hex("5f6178ff")),
+                   "cbor: a chunk of major type 3 at offset 1 does not match its string")
+    test.assert_eq(outcome(hex("7f4161ff")),
+                   "cbor: a chunk of major type 2 at offset 1 does not match its string")
+    test.assert_eq(outcome(hex("5f5fffff")),
+                   "cbor: a chunk of major type 2 at offset 1 does not match its string")
+    test.assert_eq(outcome(hex("7f7fffff")),
+                   "cbor: a chunk of major type 3 at offset 1 does not match its string")
+    test.assert_eq(outcome(hex("5f1cff")), "cbor: additional information 28 at offset 1 is reserved")
+    test.assert_eq(outcome(hex("7f1cff")), "cbor: additional information 28 at offset 1 is reserved")
+    test.assert_eq(outcome(hex("9f1c")), "cbor: additional information 28 at offset 1 is reserved")
+    // An item the producer never closed is a truncation, not a value.
+    test.assert_eq(outcome(hex("5f4161")), "cbor: the value at offset 3 needs 1 more bytes")
+    test.assert_eq(outcome(hex("7f6178")), "cbor: the value at offset 3 needs 1 more bytes")
+    test.assert_eq(outcome(hex("9f01")), "cbor: the value at offset 2 needs 1 more bytes")
+    test.assert_eq(outcome(hex("bf0102")), "cbor: the value at offset 3 needs 1 more bytes")
+    test.assert_eq(outcome(hex("9f")), "cbor: the value at offset 1 needs 1 more bytes")
+    test.assert_eq(outcome(hex("bf")), "cbor: the value at offset 1 needs 1 more bytes")
+    // A break where a map's value is due is a break in the middle of a
+    // pair, which RFC 8949 § 3.2.1 does not allow.
+    test.assert_eq(outcome(hex("bf01ff")), "cbor: the break byte at offset 2 closes nothing")
+    test.assert_eq(outcome(hex("bf1c")), "cbor: additional information 28 at offset 1 is reserved")
+    test.assert_eq(outcome(hex("bf011c")),
+                   "cbor: additional information 28 at offset 2 is reserved")
+
+@test
+fn test_decode_prefix_limited_is_decode_prefix_with_a_limit()
+    match cborfmt.decode_prefix_limited(hex("8181f6"), 1)
+        Ok(_)  => test.fail("two levels past a limit of one")
+        Err(e) => test.assert(says(e, "nests past the limit of 1"))
+    match cborfmt.decode_prefix_limited(hex("8181f6"), 2)
+        Ok(_)  => test.fail("three levels past a limit of two")
+        Err(e) => test.assert(says(e, "nests past the limit of 2"))
+    match cborfmt.decode_prefix_limited(hex("8181f6"), 3)
+        Ok(p)  =>
+            test.assert_eq(p.consumed, 3)
+            test.assert_eq(cborfmt.type_name(p.value), "array")
+        Err(e) => test.fail(e.message())
+    // A limit below one is taken as one, because a document is at least
+    // one value deep.
+    match cborfmt.decode_prefix_limited(hex("f6"), 0)
+        Err(e) => test.fail(e.message())
+        Ok(p)  => test.assert_eq(p.consumed, 1)
+    match cborfmt.decode_prefix_limited(hex("f681f6"), 1)
+        Ok(p)  => test.assert_eq(p.consumed, 1)
+        Err(e) => test.fail(e.message())
+
+// ── The stream ──────────────────────────────────────────────────────
+
+@test
+fn test_a_value_split_at_every_boundary_decodes_the_same()
+    // The shape a feed-and-drain decoder has to get right: three bytes
+    // and then the rest must decode the same item as six at once.  The
+    // interesting splits are inside the head, inside a length, inside a
+    // container, and inside an indefinite chunk.
+    let docs = [hex("820102"), hex("83010203"), hex("f93e00"), hex("bf617801ff"),
+                hex("a2616101616202"), hex("d9d9f7f6"), hex("5f426162426364ff"),
+                hex("1bffffffffffffffff")]
+    for doc in docs
+        let n = bytes.len(doc)
+        let want = values_hex(fed(cbordec.decoder(), doc).values)
+        for k in 1..n
+            let d = cbordec.decoder()
+            let first = fed(d, bytes.slice(doc, 0, k))
+            let second = fed(first.decoder, bytes.slice(doc, k, n))
+            test.assert_eq(values_hex(first.values) + values_hex(second.values), want)
+            test.assert_eq(cbordec.pending(second.decoder), 0)
+        // And one byte at a time, which is what a UART delivers.
+        var d2 = cbordec.decoder()
+        var got = ""
+        for k in 0..n
+            let step = fed(d2, bytes.slice(doc, k, k + 1))
+            got = got + values_hex(step.values)
+            d2 = step.decoder
+        test.assert_eq(got, want)
+
+@test
+fn test_the_stream_drains_everything_a_chunk_finished()
+    // One chunk may carry a sequence of documents, and a value that
+    // spans chunks finishes on the chunk that completes it.
+    let f = fed(cbordec.decoder(), hex("010203"))
+    test.assert_eq(list.len(f.values), 3)
+    test.assert_eq(values_hex(f.values), "01 02 03 ")
+    test.assert_eq(cbordec.stream_at(f.decoder), 3)
+    let split = fed(cbordec.decoder(), hex("82"))
+    test.assert_eq(list.len(split.values), 0)
+    test.assert_eq(cbordec.pending(split.decoder), 1)
+    let rest = fed(split.decoder, hex("0102"))
+    test.assert_eq(list.len(rest.values), 1)
+    test.assert_eq(cbordec.pending(rest.decoder), 0)
+    test.assert_eq(cbordec.stream_at(rest.decoder), 3)
+
+@test
+fn test_the_stream_reports_every_refusal_at_its_stream_offset()
+    // The offsets a stream reports are counted from the first chunk and
+    // never from the chunk the fault arrived in — which is the whole
+    // reason a decoder carries `at`.
+    test.assert_eq(cbor_fault(cbordec.feed(cbordec.decoder(), hex("1c"))),
+                   "cbor: additional information 28 at offset 0 is reserved")
+    test.assert_eq(cbor_fault(cbordec.feed(cbordec.decoder(), hex("1f"))),
+                   "cbor: major type 0 at offset 0 has no indefinite form")
+    test.assert_eq(cbor_fault(cbordec.feed(cbordec.decoder(), hex("ff"))),
+                   "cbor: the break byte at offset 0 closes nothing")
+    test.assert_eq(cbor_fault(cbordec.feed(cbordec.decoder(), hex("5f6178ff"))),
+                   "cbor: a chunk of major type 3 at offset 1 does not match its string")
+    test.assert_eq(cbor_fault(cbordec.feed(cbordec.decoder(), hex("61ff"))),
+                   "cbor: the text at offset 1 is not UTF-8")
+    // A value accepted first moves the offset: the fault in the next
+    // document is reported where it really is in the stream.
+    test.assert_eq(cbor_fault(cbordec.feed(cbordec.decoder(), hex("f6f6fc"))),
+                   "cbor: additional information 28 at offset 2 is reserved")
+    let one = fed(cbordec.decoder(), hex("f6"))
+    test.assert_eq(cbor_fault(cbordec.feed(one.decoder, hex("f6fc"))),
+                   "cbor: additional information 28 at offset 2 is reserved")
+    test.assert_eq(cbor_fault(cbordec.feed(one.decoder, hex("f61f"))),
+                   "cbor: major type 0 at offset 2 has no indefinite form")
+    test.assert_eq(cbor_fault(cbordec.feed(one.decoder, hex("f6ff"))),
+                   "cbor: the break byte at offset 2 closes nothing")
+    test.assert_eq(cbor_fault(cbordec.feed(one.decoder, hex("f65f6178ff"))),
+                   "cbor: a chunk of major type 3 at offset 3 does not match its string")
+    test.assert_eq(cbor_fault(cbordec.feed(one.decoder, hex("f661ff"))),
+                   "cbor: the text at offset 3 is not UTF-8")
+    // The limit travels on the decoder, and a fault that names it is
+    // the reader's own.
+    let shallow = cbordec.with_depth_limit(cbordec.decoder(), 1)
+    test.assert_eq(cbor_fault(cbordec.feed(shallow, hex("8181f6"))),
+                   "cbor: the value at offset 1 nests past the limit of 1")
+    test.assert_eq(cbor_fault(cbordec.feed(cbordec.with_depth_limit(one.decoder, 1),
+                                           hex("f68181f6"))),
+                   "cbor: the value at offset 3 nests past the limit of 1")
+
+@test
+fn test_the_stream_says_when_an_indefinite_length_went_by()
+    let plain = fed(cbordec.decoder(), hex("820102"))
+    test.assert_eq(cbordec.saw_indefinite(plain.decoder), false)
+    let array = fed(cbordec.decoder(), hex("9f0102ff"))
+    test.assert_eq(cbordec.saw_indefinite(array.decoder), true)
+    let text = fed(cbordec.decoder(), hex("7f6178ff"))
+    test.assert_eq(cbordec.saw_indefinite(text.decoder), true)
+    let bytes_v = fed(cbordec.decoder(), hex("5f4161ff"))
+    test.assert_eq(cbordec.saw_indefinite(bytes_v.decoder), true)
+    // The head walk that answers this steps over every shape: a
+    // definite array, a tag, a wide head, a definite string, and a
+    // nested indefinite one.
+    let nested = fed(cbordec.decoder(), hex("82d9d9f781019f01ff"))
+    test.assert_eq(cbordec.saw_indefinite(nested.decoder), true)
+    let definite = fed(cbordec.decoder(), hex("82d9d9f781011bffffffffffffffff"))
+    test.assert_eq(cbordec.saw_indefinite(definite.decoder), false)
+    let strings = fed(cbordec.decoder(), hex("826161426162"))
+    test.assert_eq(cbordec.saw_indefinite(strings.decoder), false)
+    // The flag is sticky: a later chunk does not clear it.
+    let again = fed(array.decoder, hex("0102"))
+    test.assert_eq(cbordec.saw_indefinite(again.decoder), true)
+    // A walk that steps over a map counts its PAIRS.
+    let map = fed(cbordec.decoder(), hex("a2616101616202"))
+    test.assert_eq(cbordec.saw_indefinite(map.decoder), false)
+    let imap = fed(cbordec.decoder(), hex("bf617801ff"))
+    test.assert_eq(cbordec.saw_indefinite(imap.decoder), true)
+    let deep = fed(cbordec.decoder(), hex("8281819f01ff820102"))
+    test.assert_eq(cbordec.saw_indefinite(deep.decoder), true)
+
+@test
+fn test_the_stream_holds_a_partial_value_and_finishes()
+    let d = cbordec.decoder()
+    let cut = fed(d, hex("bf6178"))
+    test.assert_eq(list.len(cut.values), 0)
+    test.assert_eq(cbordec.pending(cut.decoder), 3)
+    match cbordec.finish(cut.decoder)
+        Ok(_)  => test.fail("the map was never closed")
+        Err(e) => test.assert(says(e, "needs 1 more bytes"))
+    let clean = fed(cbordec.decoder(), hex("8102"))
+    match cbordec.finish(clean.decoder)
+        Ok(back) => test.assert_eq(cbordec.pending(back), 0)
+        Err(e)   => test.fail(e.message())
+    match cbordec.finish(cbordec.decoder())
+        Ok(back) => test.assert_eq(cbordec.stream_at(back), 0)
+        Err(e)   => test.fail(e.message())
+    // `with_depth_limit` takes a limit below one as one.
+    let shallow = cbordec.with_depth_limit(cbordec.decoder(), 0)
+    test.assert_eq(cbor_fault(cbordec.feed(shallow, hex("81f6"))),
+                   "cbor: the value at offset 1 nests past the limit of 1")
+    let deep = cbordec.with_depth_limit(cbordec.decoder(), 90)
+    test.assert_eq(list.len(fed(deep, hex("8181f6")).values), 1)
+    // The decoder a `feed` answers carries the same limit as the one it
+    // was called on.
+    let carried = cbordec.with_depth_limit(cbordec.decoder(), 3)
+    let f3 = fed(carried, hex("818181f6"))
+    test.assert_eq(cbor_fault(cbordec.feed(f3.decoder, hex("8181f6"))), "ok")
+
+@test
+fn test_the_walk_steps_over_every_head_width()
+    // The walk behind `saw_indefinite` measures the head of every item
+    // it steps over, so every argument width a document may use is
+    // walked: two bytes for a length in the wide form, and eight for a
+    // 64-bit integer.
+    let wide_len = fed(cbordec.decoder(), hex("9f79000161ff"))
+    test.assert_eq(list.len(wide_len.values), 1)
+    test.assert_eq(cbordec.saw_indefinite(wide_len.decoder), true)
+    let wide_int = fed(cbordec.decoder(), hex("9f1b0000000000000001ff"))
+    test.assert_eq(list.len(wide_int.values), 1)
+    test.assert_eq(cbordec.saw_indefinite(wide_int.decoder), true)
+    let one_byte = fed(cbordec.decoder(), hex("9f1818ff"))
+    test.assert_eq(list.len(one_byte.values), 1)
+    test.assert_eq(cbordec.saw_indefinite(one_byte.decoder), true)
+    let four_bytes = fed(cbordec.decoder(), hex("9f1a00000001ff"))
+    test.assert_eq(list.len(four_bytes.values), 1)
+    test.assert_eq(cbordec.saw_indefinite(four_bytes.decoder), true)
+
+// ── The trait bridge ────────────────────────────────────────────────
+
+struct Inner
+    name: Str
+    tags: [Str]
+
+struct Opt
+    a: ?Int
+    b: ?Int
+
+struct Rows
+    rows: [Int]
+
+enum Shape
+    Dot
+    Circle(radius: Float)
+    Rect(w: Int, h: Int)
+
+struct Drawing
+    shapes: [Shape]
+
+struct Chain
+    next: [Chain]
+
+fn chain(n: Int) -> Chain
+    if n == 0
+        return Chain { next: [] }
+    Chain { next: [chain(n - 1)] }
+
+@test
+fn test_the_emitter_writes_every_value_the_trait_can_present()
+    test.assert_eq(bytes.len(cborserde.emitter_bytes(cborserde.emitter())), 0)
+    test.assert_eq(bytes.to_hex(as_cbor(3)), "03")
+    test.assert_eq(bytes.to_hex(as_cbor(0 - 300)), "39012b")
+    test.assert_eq(bytes.to_hex(as_cbor(true)), "f5")
+    test.assert_eq(bytes.to_hex(as_cbor(false)), "f4")
+    test.assert_eq(bytes.to_hex(as_cbor(1.5)),
+                   "fb3ff8000000000000")
+    test.assert_eq(bytes.to_hex(as_cbor("hi")), "626869")
+    test.assert_eq(bytes.to_hex(as_cbor("é")), "62c3a9")
+    test.assert_eq(bytes.to_hex(as_cbor([1, 2])), "820102")
+    test.assert_eq(bytes.to_hex(as_cbor([1, 2, 3, 4])),
+                   "8401020304")
+    // `Some` is its value and `None` is null: the trait announces no
+    // discriminant because a self-describing format needs none.
+    let nothing: ?Int = None
+    let something: ?Int = Some(7)
+    test.assert_eq(bytes.to_hex(as_cbor(nothing)), "f6")
+    test.assert_eq(bytes.to_hex(as_cbor(something)), "07")
+
+@test
+fn test_an_enum_writes_the_externally_tagged_map()
+    // `begin_variant` and `end_variant` are the identity here: the
+    // one-entry map comes from the walk's own `begin_struct` and
+    // `field` calls, which is what makes the document readable by a
+    // peer that has never seen the type.
+    // The annotations on the payload variants are load-bearing: a
+    // variant constructor with arguments used directly as the receiver
+    // of `.serialize` is left unresolved by the compiler and the LLVM
+    // leg then refuses the module.  The annotated binding is the
+    // workaround.
+    let dot: Shape = Dot
+    let circle: Shape = Circle(radius: 1.5)
+    let rect: Shape = Rect(w: 2, h: 3)
+    test.assert_eq(bytes.to_hex(as_cbor(dot)), "a163446f74a0")
+    test.assert_eq(bytes.to_hex(as_cbor(circle)),
+                   "a166436972636c65a166726164697573fb3ff8000000000000")
+    test.assert_eq(bytes.to_hex(as_cbor(rect)),
+                   "a16452656374a2617702616803")
+    let pair_drawing: Drawing = Drawing { shapes: [Dot, Circle(radius: 1.0)] }
+    test.assert_eq(bytes.to_hex(as_cbor(pair_drawing)),
+                   "a16673686170657382a163446f74a0a166436972636c65a166726164697573fb3ff0000000000000")
+
+@test
+fn test_a_nested_value_round_trips_through_the_bridge()
+    let v = Opt { a: Some(1), b: None }
+    let raw = as_cbor(v)
+    test.assert_eq(bytes.to_hex(raw), "a26161016162f6")
+    let back: Result<Opt, DeserializeError> = cborserde.from_bytes(raw)
+    match back
+        Ok(x)  =>
+            test.assert(x.a == Some(1))
+            test.assert(x.b == None)
+        Err(e) => test.fail(e.message())
+    let rows = Rows { rows: list.range(0, 5) }
+    let rows_raw = as_cbor(rows)
+    test.assert_eq(bytes.to_hex(rows_raw), "a164726f7773850001020304")
+    let rows_back: Result<Rows, DeserializeError> = cborserde.from_bytes(rows_raw)
+    match rows_back
+        Ok(x)  => test.assert_eq(list.len(x.rows), 5)
+        Err(e) => test.fail(e.message())
+    let inner = Inner { name: "é", tags: ["a", "b"] }
+    let inner_raw = as_cbor(inner)
+    let inner_back: Result<Inner, DeserializeError> = cborserde.from_bytes(inner_raw)
+    match inner_back
+        Ok(x)  =>
+            test.assert_eq(x.name, "é")
+            test.assert(x.tags == ["a", "b"])
+        Err(e) => test.fail(e.message())
+    let drawing = Drawing { shapes: [Dot, Circle(radius: 1.5), Rect(w: 2, h: 3)] }
+    let draw_raw = as_cbor(drawing)
+    let draw_back: Result<Drawing, DeserializeError> = cborserde.from_bytes(draw_raw)
+    match draw_back
+        Ok(x)  => test.assert_eq(list.len(x.shapes), 3)
+        Err(e) => test.fail(e.message())
+    // A document that carries the self-described prefix reads as the
+    // type inside it, because the cursor steps the tags over.
+    let prefixed = bytes.concat([hex("d9d9f7"), inner_raw])
+    let from_file: Result<Inner, DeserializeError> = cborserde.from_bytes(prefixed)
+    match from_file
+        Ok(x)  => test.assert_eq(x.name, "é")
+        Err(e) => test.fail(e.message())
+    test.assert_eq(cborserde.cursor_at(cborserde.cursor(prefixed)), 3)
+
+@test
+fn test_a_cursor_reads_where_a_walk_would_have_to_thread_itself()
+    let c = cborserde.cursor(hex("a2616101616202"))
+    test.assert_eq(cborserde.cursor_at(c), 0)
+    match c.field("a")
+        Ok(child) =>
+            match child.get_int()
+                Ok(n)  => test.assert_eq(n, 1)
+                Err(e) => test.fail(e.message())
+        Err(e)    => test.fail(e.message())
+    match c.field("b")
+        Ok(child) =>
+            match child.get_int()
+                Ok(n)  => test.assert_eq(n, 2)
+                Err(e) => test.fail(e.message())
+        Err(e)    => test.fail(e.message())
+    match c.field("z")
+        Ok(_)  => test.fail("the map carries no key z")
+        Err(e) =>
+            test.assert_eq(e.path, "$")
+            test.assert(str.contains(e.reason, "no member named z"))
+    // A tag in front of a member's value is stepped over.
+    let tagged = cborserde.cursor(hex("a16161c001"))
+    match tagged.field("a")
+        Ok(child) =>
+            match child.get_int()
+                Ok(n)  => test.assert_eq(n, 1)
+                Err(e) => test.fail(e.message())
+        Err(e)    => test.fail(e.message())
+    // Keys are the TEXT keys, in document order; a non-text key has no
+    // spelling a caller could use and is passed over.
+    test.assert(cborserde.cursor(hex("a2616101616202")).keys() == ["a", "b"])
+    test.assert(cborserde.cursor(hex("a2010102")).keys() == [])
+    test.assert(cborserde.cursor(hex("820102")).keys() == [])
+    test.assert(cborserde.cursor(hex("f6")).keys() == [])
+    test.assert(cborserde.cursor(hex("bf616101616202ff")).keys() == ["a", "b"])
+    // `opt_field` answers None for an absent key and for a null one, and
+    // Some for everything else — `0xf7`, undefined, included.
+    let opt = cborserde.cursor(hex("a26161f66162f7"))
+    test.assert(opt.opt_field("a") == None)
+    test.assert(opt.opt_field("z") == None)
+    test.assert(opt.opt_field("b") != None)
+    test.assert(cborserde.cursor(hex("a10102")).opt_field("a") == None)
+    test.assert(cborserde.cursor(hex("a1616101")).opt_field("a") != None)
+
+@test
+fn test_a_cursor_ends_an_indefinite_map_at_its_break()
+    // The member walk is the same walk with no count: `field` steps
+    // member by member and stops at the break byte, which is the other
+    // half of `member_at`.
+    let c = cborserde.cursor(hex("bf616101616202ff"))
+    match c.field("b")
+        Ok(child) =>
+            match child.get_int()
+                Ok(n)  => test.assert_eq(n, 2)
+                Err(e) => test.fail(e.message())
+        Err(e)    => test.fail(e.message())
+    match c.field("z")
+        Ok(_)  => test.fail("the map carries no key z")
+        Err(e) => test.assert(str.contains(e.reason, "no member named z"))
+
+@test
+fn test_a_cursor_reads_arrays_and_every_primitive()
+    let arr = cborserde.cursor(hex("8301f5f93800"))
+    match arr.seq_len()
+        Ok(n)  => test.assert_eq(n, 3)
+        Err(e) => test.fail(e.message())
+    match arr.seq_at(0)
+        Ok(child) =>
+            match child.get_int()
+                Ok(n)  => test.assert_eq(n, 1)
+                Err(e) => test.fail(e.message())
+        Err(e)    => test.fail(e.message())
+    match arr.seq_at(1)
+        Ok(child) =>
+            match child.get_bool()
+                Ok(b)  => test.assert_eq(b, true)
+                Err(e) => test.fail(e.message())
+        Err(e)    => test.fail(e.message())
+    match arr.seq_at(2)
+        Ok(child) =>
+            match child.get_float()
+                Ok(f)  => test.assert(f == 0.5)
+                Err(e) => test.fail(e.message())
+        Err(e)    => test.fail(e.message())
+    test.assert(str.contains(str_of(arr.seq_at(3)), "no element 3 of 3"))
+    test.assert(str.contains(str_of(arr.seq_at(0 - 1)), "no element -1 of 3"))
+    // An indefinite array counts to its break, and a non-array is a
+    // refusal rather than an empty sequence.
+    let indef = cborserde.cursor(hex("9f0102ff"))
+    match indef.seq_len()
+        Ok(n)  => test.assert_eq(n, 2)
+        Err(e) => test.fail(e.message())
+    match indef.seq_at(1)
+        Ok(child) =>
+            match child.get_int()
+                Ok(n)  => test.assert_eq(n, 2)
+                Err(e) => test.fail(e.message())
+        Err(e)    => test.fail(e.message())
+    let not_arr = cborserde.cursor(hex("f6"))
+    test.assert(str.contains(str_of(not_arr.seq_len()), "expected an array"))
+    test.assert(str.contains(str_of(not_arr.seq_at(0)), "expected an array"))
+    // A sequence in front of a tag reads the same way.
+    let tagged_arr = cborserde.cursor(hex("c0820102"))
+    match tagged_arr.seq_len()
+        Ok(n)  => test.assert_eq(n, 2)
+        Err(e) => test.fail(e.message())
+    // Every primitive, at each of the three float widths, and each
+    // getter's refusal of the others.
+    test.assert(cborserde.cursor(hex("f6")).is_null())
+    test.assert(not cborserde.cursor(hex("01")).is_null())
+    match cborserde.cursor(hex("01")).get_bool()
+        Ok(_)  => test.fail("an integer is not a bool")
+        Err(e) => test.assert(str.contains(e.reason, "expected a bool"))
+    match cborserde.cursor(hex("20")).get_int()
+        Ok(n)  => test.assert_eq(n, 0 - 1)
+        Err(e) => test.fail(e.message())
+    match cborserde.cursor(hex("1bffffffffffffffff")).get_int()
+        Ok(_)  => test.fail("2^64 - 1 does not fit an Int")
+        Err(e) => test.assert(str.contains(e.reason, "at or beyond 2^63"))
+    match cborserde.cursor(hex("61ff")).get_int()
+        Ok(_)  => test.fail("a text is not an integer")
+        Err(e) => test.assert(str.contains(e.reason, "expected an integer"))
+    match cborserde.cursor(hex("f93800")).get_float()
+        Ok(f)  => test.assert(f == 0.5)
+        Err(e) => test.fail(e.message())
+    match cborserde.cursor(hex("fa3f000000")).get_float()
+        Ok(f)  => test.assert(f == 0.5)
+        Err(e) => test.fail(e.message())
+    match cborserde.cursor(hex("fb3fe0000000000000")).get_float()
+        Ok(f)  => test.assert(f == 0.5)
+        Err(e) => test.fail(e.message())
+    match cborserde.cursor(hex("f6")).get_float()
+        Ok(_)  => test.fail("null is not a float")
+        Err(e) => test.assert(str.contains(e.reason, "expected a float"))
+    match cborserde.cursor(hex("7f6178ff")).get_str()
+        Ok(t)  => test.assert_eq(t, "x")
+        Err(e) => test.fail(e.message())
+    match cborserde.cursor(hex("4161")).get_str()
+        Ok(_)  => test.fail("a byte string is not text")
+        Err(e) => test.assert(str.contains(e.reason, "expected a text string"))
+    test.assert_eq(cborserde.cursor(hex("01")).fail("custom").reason, "custom")
+    test.assert_eq(cborserde.cursor(hex("01")).fail("custom").path, "$")
+    // A cursor steps over a leading tag and stands on the value it
+    // wraps; a head it cannot step over is read from where it stands.
+    test.assert_eq(cborserde.cursor_at(cborserde.cursor(hex("c001"))), 1)
+    let reserved = cborserde.cursor(hex("dc01"))
+    test.assert_eq(cborserde.cursor_at(reserved), 0)
+    test.assert(str.contains(str_of(reserved.field("a")), "no member named a"))
+
+@test
+fn test_the_bridge_refuses_what_it_cannot_read_or_write()
+    // A type nested past the decoder's limit is refused on the way OUT
+    // as well as on the way in: the writer produces the document and
+    // the reader is what refuses it.
+    test.assert(str.contains(cbor_fault(cborserde.to_bytes(chain(70))),
+                             "nests past the limit of 64"))
+    test.assert_eq(list.len(chain(70).next), 1)
+    // A missing member, a member of the wrong family, and a member the
+    // scan cannot reach.
+    let missing: Result<Inner, DeserializeError> = cborserde.from_bytes(hex("a1646e616d656178"))
+    test.assert(str.contains(str_of(missing), "no member named tags"))
+    let wrong: Result<Inner, DeserializeError> = cborserde.from_bytes(hex("a2646e616d6501647461677382016178"))
+    test.assert(str.contains(str_of(wrong), "expected a text string"))
+    // A member whose head is a reserved additional information: the
+    // map's scan passes over it rather than building it.
+    let broken: Result<Inner, DeserializeError> = cborserde.from_bytes(hex("a2646e616d651c647461677380"))
+    test.assert(str_of(broken) != "ok")
+    // A cursor over a document that is not a map at all.
+    let not_map: Result<Rows, DeserializeError> = cborserde.from_bytes(hex("01"))
+    test.assert(str.contains(str_of(not_map), "no member named rows"))
+    // A sequence member that is not an array, and one that is not a
+    // whole item.
+    let not_seq: Result<Rows, DeserializeError> = cborserde.from_bytes(hex("a164726f777301"))
+    test.assert(str.contains(str_of(not_seq), "expected an array"))
+    let short_seq: Result<Rows, DeserializeError> = cborserde.from_bytes(hex("a164726f77738201"))
+    test.assert(str_of(short_seq) != "ok")
+    // A drawing whose shapes are not an array, and one whose variant
+    // name no reader knows.
+    let null_shapes: Result<Drawing, DeserializeError> = cborserde.from_bytes(hex("a166736861706573f6"))
+    test.assert(str_of(null_shapes) != "ok")
+    let no_variant: Result<Drawing, DeserializeError> = cborserde.from_bytes(hex("a16673686170657381a1654e6f7065a0"))
+    test.assert(str_of(no_variant) != "ok")
+
+// ── The cursor's own head walk ──────────────────────────────────────
+
+@test
+fn test_a_cursor_steps_over_members_it_never_reads()
+    // `field` finds a member by walking heads, so a member the scan
+    // steps over is never decoded: a reserved additional information,
+    // an indefinite head on a major type that has none, a length larger
+    // than the document, an array claiming more elements than are
+    // there, an element of one that is reserved, an indefinite string
+    // whose chunk is of the wrong type, and a break where a value is
+    // due all leave the scan able to answer only that the map does not
+    // carry the name.
+    let unreadable = [hex("a261611c616201"), hex("a261611f616201"),
+                      hex("a261615861616201"), hex("a261619a0000001061616201"),
+                      hex("a26161811c616201"), hex("a261615f6161ff616201"),
+                      hex("a26161ff616201"), hex("a1ff"), hex("a11c"),
+                      hex("bc6161")]
+    for src in unreadable
+        test.assert(str.contains(str_of(cborserde.cursor(src).field("b")),
+                                 "no member named b"))
+    // A member the scan CAN step over is found and read, whether it is
+    // an array, a tag around a value, or an indefinite-length array.
+    let steppable = [hex("a2616181f6616201"), hex("a26161c0f6616201"),
+                     hex("a261619f01ff616201")]
+    for src in steppable
+        match cborserde.cursor(src).field("b")
+            Ok(member) =>
+                match member.get_int()
+                    Ok(n)  => test.assert_eq(n, 1)
+                    Err(e) => test.fail(e.message())
+            Err(e)     => test.fail(e.message())
+    // `seq_len` reads its count from the head, so the long but legal
+    // heads count, and the ones that are not an array count not at all:
+    // a reserved head, a tag head the cursor will not step over, and an
+    // indefinite array that never breaks, holds a reserved element, or
+    // runs out of bytes first.
+    match cborserde.cursor(hex("9801f6")).seq_len()
+        Ok(n)  => test.assert_eq(n, 1)
+        Err(e) => test.fail(e.message())
+    match cborserde.cursor(hex("9a00000001f6")).seq_len()
+        Ok(n)  => test.assert_eq(n, 1)
+        Err(e) => test.fail(e.message())
+    let not_arrays = [hex("9c6161"), hex("dc"), hex("9f01"), hex("9f1f"),
+                      hex("9f5f4161"), hex("9f5f4261")]
+    for src in not_arrays
+        test.assert(str.contains(str_of(cborserde.cursor(src).seq_len()),
+                                 "expected an array"))
+    // A head the cursor cannot step over is not a null, and an array
+    // head claiming more elements than the document holds still answers
+    // an element cursor: it stands where the document ended, and reads
+    // nothing from there.
+    test.assert_eq(cborserde.cursor(hex("dc")).is_null(), false)
+    match cborserde.cursor(hex("82")).seq_at(1)
+        Ok(member) =>
+            test.assert(str.contains(str_of(member.get_int()), "expected an integer"))
+        Err(e)     => test.fail(e.message())

@@ -11,13 +11,13 @@
 // tier prefers CBOR — and a claim that was only asserted would not be
 // worth the sentence.
 //
-// It BUILDS; it does not run.  Every function it calls is a `todo()`
-// today, so a device that executed this would panic on the first line
-// of `main`.  What is being checked is the tier: `--target=nrf52-qemu`
-// stamps `@tier(embedded)` on every function it compiles, so the
-// checker walks the module and refuses a `Str` concatenation, a `Bytes`
-// call or an unbounded `while` wherever the implementation later puts
-// one.
+// It BUILDS, and building is the whole check — `cborhead`'s bodies are
+// head arithmetic over a buffer, so nothing here is a `todo()` that a
+// device would panic on.  What is being checked is the tier:
+// `--target=nrf52-qemu` stamps `@tier(embedded)` on every function it
+// compiles, so the checker walks the module and refuses a `Str`
+// concatenation, a `Bytes` call or an unbounded `while` anywhere the
+// implementation puts one.
 //
 // ONLY `cborhead` IS USED HERE, and that is the split rather than a
 // convenience: `cborfmt`, `cbordec` and `cborserde` speak `Bytes`,

@@ -4,6 +4,80 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## Unreleased
+
+### Changed
+
+- Internal: ladders rewritten as `match` with range patterns, and errors are propagated with `!`. No public signature changed.
+
+### Fixed
+
+- A head scanned a byte at a time takes a nine-byte argument without overflowing, a cursor stepping over members refuses nesting past the decoder's depth limit, and an indefinite-length string of many chunks is joined in one pass.
+
+## 0.1.0 — 2026-10-11
+
+The implementation.  Every body published as `todo()` in 0.0.1 is
+written, and `tests/cbor_tests.nv` — the interface release's own suite,
+unchanged but for its stamp — passes as written.
+
+Added:
+
+- `cborfmt.decode_prefix_limited`: `decode_prefix` under a nesting
+  limit the caller carries.  `cbordec.feed` decodes one value at a time
+  out of a buffer that also holds a partial one, and the limit has to
+  be the decoder's own rather than the default's.
+- `tests/cbor_nv_edge_tests.nv`: 40 tests over the head arithmetic at
+  both ends of its ranges, every refusal the reader and the bridge
+  make, the float widths at their edges, the UTF-8 matrix, the
+  indefinite forms the value tree collapses, the documents a reader
+  accepts and the writer would not produce, the stream's offsets and
+  its resumability, and the writer's own paths.
+
+### Changed
+
+- `x == false` is written `not x` at the six sites the lint's
+  `redundant-bool` rule names (`tests/cbor_nv_edge_tests.nv`).  No
+  signature changed.
+
+### Known
+
+- **Text that decodes to a string containing a NUL loses everything
+  from the NUL on.**  A novo `Str` is NUL-terminated and `bytes.to_str`
+  stops there, so a document carrying such a text reads back short.
+  Nothing refuses it, and `decode` cannot tell.
+- **A `CborSimple` outside 0..255 is masked** when it is written back:
+  `CborSimple(300)` encodes as `f8 2c`.  Only a value built by hand can
+  be out of range; the reader never answers one.
+- **A length at or above 2^63 saturates** instead of reporting an
+  exact shortfall: a head announcing it answers "needs
+  9223372036854775807 more bytes", which is a lower bound, not the
+  count.
+- **A chunk that is itself indefinite, inside an indefinite string, is
+  `CborBadChunk`** rather than a refusal of its own — the spec has a
+  name for the rule and not for the case.
+- **A missing map key is `CborWrongType`** whose `want` is the key and
+  whose `saw` is `"absent"`; the cursor's own answer is
+  `no member named <key>`.  A reader has no refusal of its own for
+  "the map is fine and the key is not in it".
+- **RFC 8949 § 3.3's two-byte `f8 nn` with `nn` below 32 is read, not
+  refused.**  Re-encoding writes the one-byte form, so `is_canonical`
+  reports such a document as not canonical, which is the right answer
+  to a question that has nothing to do with the read.
+- **The bridge writes a double for every float.**  The standard
+  library's `Serializer` has one float hook, so `CborFloat16` and
+  `CborFloat32` are reachable from the value tree and not from the
+  walk.  Values are unaffected; the bytes are wider than they need to
+  be.
+- **A cursor over a malformed map answers `no member named …`** rather
+  than failing: it walks member by member and a member it cannot read
+  ends the walk.  The value tree's `decode` refuses the same bytes.
+- **A variant constructor with arguments cannot be used directly as a
+  method receiver.**  The compiler leaves such a receiver unresolved
+  and the LLVM leg refuses the module (IR verification, undefined
+  `@novo_user_<Enum>_serialize`); the tests bind the value to an
+  annotated `let` first, which is the workaround.  Filed as
+  `bugs/codegen-llvm/a-variant-constructor-as-a-method-receiver-is-left-unresolved.md`.
+
 ## 0.0.2 — 2026-09-15
 
 README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
