@@ -480,7 +480,7 @@ fn test_the_initial_byte_is_answerable_without_encoding()
 fn test_encode_into_writes_into_the_callers_buffer()
     var dst = bytes.cursor_le(bytes.zeros(8))
     let three = CborArray([CborUnsigned(1), CborUnsigned(2), CborUnsigned(3)])
-    match cborfmt.encode_into(three, CborShortest, dst)
+    match cborfmt.encode_into(three, CborShortest, var dst)
         Err(e) => test.fail(e.message())
         Ok(n)  =>
             test.assert_eq(n, 4)
@@ -490,7 +490,7 @@ fn test_encode_into_writes_into_the_callers_buffer()
 fn test_encode_into_refuses_a_buffer_smaller_than_the_answer()
     var dst = bytes.cursor_le(bytes.zeros(2))
     let three = CborArray([CborUnsigned(1), CborUnsigned(2), CborUnsigned(3)])
-    match cborfmt.encode_into(three, CborShortest, dst)
+    match cborfmt.encode_into(three, CborShortest, var dst)
         Ok(_)  => test.fail("four bytes do not fit two")
         Err(e) =>
             match e

@@ -538,7 +538,7 @@ fn test_a_wide_integer_is_written_at_its_own_width()
     test.assert_eq(outcome(hex("3bffffffffffffffff")), "wide")
     // And into a buffer the caller owns.
     var dst = bytes.cursor_le(bytes.zeros(9))
-    match cborfmt.encode_into(CborWideInt(0, 0), CborShortest, dst)
+    match cborfmt.encode_into(CborWideInt(0, 0), CborShortest, var dst)
         Ok(n)  =>
             test.assert_eq(n, 9)
             test.assert_eq(bytes.to_hex(bytes.slice(dst.finish(), 0, n)), "1b0000000000000000")

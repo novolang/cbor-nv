@@ -877,20 +877,20 @@ fn put_float(var dst: Cursor, f: Float, mode: CborMode, declared: Int)
     if mode == CborCanonical
         let width = canonical_float_len(f)
         if width == 3
-            put_half(dst, f)
+            put_half(var dst, f)
             return
         if width == 5
-            put_single(dst, f)
+            put_single(var dst, f)
             return
-        put_double(dst, f)
+        put_double(var dst, f)
         return
     if declared == 3
-        put_half(dst, f)
+        put_half(var dst, f)
         return
     if declared == 5
-        put_single(dst, f)
+        put_single(var dst, f)
         return
-    put_double(dst, f)
+    put_double(var dst, f)
 
 // The half-precision form, `f9` and two bytes.
 fn put_half(var dst: Cursor, f: Float)
@@ -934,7 +934,7 @@ fn bytes_before(a: Bytes, b: Bytes) -> Bool
 @tier(app)
 fn put_text(var dst: Cursor, t: Str)
     let b = bytes.from_str(t)
-    put_head(dst, cborhead.major_text(), bytes.len(b))
+    put_head(var dst, cborhead.major_text(), bytes.len(b))
     dst.put_bytes(b)
 
 // `e` inserted among `entries` before the first key that sorts after
@@ -986,38 +986,38 @@ fn put_wide_head(var dst: Cursor, major: Int, pattern: Int)
 @tier(app)
 fn write(var dst: Cursor, v: CborValue, mode: CborMode)
     match v
-        CborUnsigned(n)             => put_head(dst, cborhead.major_unsigned(), n)
-        CborNegative(n)             => put_head(dst, cborhead.major_negative(),
+        CborUnsigned(n)             => put_head(var dst, cborhead.major_unsigned(), n)
+        CborNegative(n)             => put_head(var dst, cborhead.major_negative(),
                                           cborhead.negative_arg(n))
-        CborWideInt(major, pattern) => put_wide_head(dst, major, pattern)
+        CborWideInt(major, pattern) => put_wide_head(var dst, major, pattern)
         CborBytes(b)                =>
-            put_head(dst, cborhead.major_bytes(), bytes.len(b))
+            put_head(var dst, cborhead.major_bytes(), bytes.len(b))
             dst.put_bytes(b)
-        CborText(t)                 => put_text(dst, t)
+        CborText(t)                 => put_text(var dst, t)
         CborArray(items)            =>
-            put_head(dst, cborhead.major_array(), list.len(items))
+            put_head(var dst, cborhead.major_array(), list.len(items))
             for item in items
-                write(dst, item, mode)
+                write(var dst, item, mode)
         CborMap(entries)            =>
-            put_head(dst, cborhead.major_map(), list.len(entries))
+            put_head(var dst, cborhead.major_map(), list.len(entries))
             if mode == CborCanonical
                 for e in canonical_order(entries)
-                    write(dst, e.key, mode)
-                    write(dst, e.value, mode)
+                    write(var dst, e.key, mode)
+                    write(var dst, e.value, mode)
             else
                 for e in entries
-                    write(dst, e.key, mode)
-                    write(dst, e.value, mode)
+                    write(var dst, e.key, mode)
+                    write(var dst, e.value, mode)
         CborTagged(tag, item)       =>
-            put_head(dst, cborhead.major_tag(), tag)
-            write(dst, item, mode)
-        CborBool(b)                 => put_simple(dst, (if b then 21 else 20))
-        CborNull                    => put_simple(dst, 22)
-        CborUndefined               => put_simple(dst, 23)
-        CborSimple(s)               => put_simple(dst, s)
-        CborFloat16(f)              => put_float(dst, f, mode, 3)
-        CborFloat32(f)              => put_float(dst, f, mode, 5)
-        CborFloat64(f)              => put_float(dst, f, mode, 9)
+            put_head(var dst, cborhead.major_tag(), tag)
+            write(var dst, item, mode)
+        CborBool(b)                 => put_simple(var dst, (if b then 21 else 20))
+        CborNull                    => put_simple(var dst, 22)
+        CborUndefined               => put_simple(var dst, 23)
+        CborSimple(s)               => put_simple(var dst, s)
+        CborFloat16(f)              => put_float(var dst, f, mode, 3)
+        CborFloat32(f)              => put_float(var dst, f, mode, 5)
+        CborFloat64(f)              => put_float(var dst, f, mode, 9)
 
 // Encode `v` and answer the bytes.
 //
@@ -1036,7 +1036,7 @@ fn write(var dst: Cursor, v: CborValue, mode: CborMode)
 pub @tier(app)
 fn encode(v: CborValue, mode: CborMode) -> Bytes
     var dst = bytes.cursor_be(bytes.zeros(encoded_len(v, mode)))
-    write(dst, v, mode)
+    write(var dst, v, mode)
     dst.finish()
 
 // Encode `v` into a buffer the caller already owns, and answer the
@@ -1050,7 +1050,7 @@ fn encode_into(v: CborValue, mode: CborMode, var dst: Cursor) -> Result<Int, Cbo
     let have = dst.remaining()
     if need > have
         return Err(CborBufferTooSmall(need, have))
-    write(dst, v, mode)
+    write(var dst, v, mode)
     Ok(need)
 
 // Whether `src` is what `CborCanonical` would have produced for the
